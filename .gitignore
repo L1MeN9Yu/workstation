@@ -12,9 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local code index (machine-local, not shared)
+.codegraph/
+
 # Editor directories and files
 .vscode/*
-!.vscode/extensions.json
 .idea
 .DS_Store
 *.suo
