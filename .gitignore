@@ -12,11 +12,17 @@ dist
 dist-ssr
 *.local
 
-# Local code index (machine-local, not shared)
+# Local code index and AI tooling files (kept locally, NOT tracked in git)
 .codegraph/
+.opencode/
+.vscode/
+openspec/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+copilot-instructions.md
 
 # Editor directories and files
-.vscode/*
 .idea
 .DS_Store
 *.suo
