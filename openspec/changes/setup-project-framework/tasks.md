@@ -4,7 +4,8 @@
 - [ ] 1.2 前端 job：`npm ci` → `lint` → `typecheck` → `build`
 - [ ] 1.3 后端 job：`cargo fmt --check` → `cargo clippy` → `cargo test` → `cargo build`
 - [ ] 1.4 合并为一个 workflow，main 分支与 PR 均触发
-- [ ] 1.5 推送后验证 CI 在 GitHub 上首次运行通过
+- [ ] 1.5 通过 OS matrix 覆盖 Windows / macOS / Linux 三平台（Linux 额外装 Tauri 系统依赖）
+- [ ] 1.6 推送后验证 CI 在三个平台首次运行通过
 
 ## 2. 工程初始化
 
