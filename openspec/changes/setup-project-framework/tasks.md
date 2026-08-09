@@ -5,7 +5,7 @@
 - [x] 1.3 后端 job：`cargo fmt --check` → `cargo clippy` → `cargo test` → `cargo build`
 - [x] 1.4 合并为一个 workflow，main 分支与 PR 均触发
 - [x] 1.5 通过 OS matrix 覆盖 Windows / macOS / Linux 三平台（Linux 额外装 Tauri 系统依赖）
-- [ ] 1.6 推送后验证 CI 在三个平台首次运行通过
+- [x] 1.6 推送后验证 CI 在三个平台首次运行通过（6/6 job 全绿）
 
 ## 2. 工程初始化
 
@@ -43,4 +43,4 @@
 
 - [x] 7.1 补充 README（开发/构建命令、目录结构说明）
 - [x] 7.2 运行 `cargo tauri build` 验证可构建
-- [ ] 7.3 提交变更并推送
+- [x] 7.3 提交变更并推送（PR #1 merged）
