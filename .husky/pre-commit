@@ -1,0 +1,8 @@
+npx lint-staged
+
+if git diff --cached --name-only | grep -q '\.rs$'; then
+  cargo fmt --manifest-path src-tauri/Cargo.toml -- --check || {
+    echo "✗ rust 格式检查未通过，请先执行: (cd src-tauri && cargo fmt)"
+    exit 1
+  }
+fi
