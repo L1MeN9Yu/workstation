@@ -6,16 +6,17 @@ const isTauri = typeof window !== "undefined" && !!window.__TAURI__;
 
 interface ThemeState {
   theme: Theme;
+  _userTouched: boolean;
   toggle: () => void;
   setTheme: (t: Theme) => void;
 }
 
-function applyTheme(theme: Theme) {
+export function applyTheme(theme: Theme) {
   document.documentElement.classList.toggle("dark", theme === "dark");
   document.documentElement.dataset.theme = theme;
 }
 
-function persistTheme(theme: Theme) {
+export function persistTheme(theme: Theme) {
   if (isTauri) {
     void import("../lib/configStore").then(({ writeConfig }) =>
       writeConfig("theme", { theme }),
@@ -27,10 +28,11 @@ function persistTheme(theme: Theme) {
 
 export const useTheme = create<ThemeState>((set, get) => ({
   theme: "light",
+  _userTouched: false,
   toggle: () => {
     const next: Theme = get().theme === "light" ? "dark" : "light";
     persistTheme(next);
-    set({ theme: next });
+    set({ theme: next, _userTouched: true });
     applyTheme(next);
   },
   setTheme: (theme) => {
@@ -40,6 +42,9 @@ export const useTheme = create<ThemeState>((set, get) => ({
 }));
 
 export async function initTheme(): Promise<void> {
+  if (useTheme.getState()._userTouched) {
+    return;
+  }
   let saved: Theme | null;
   if (isTauri) {
     try {

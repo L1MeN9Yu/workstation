@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 html,
 body,
 #root {
@@ -48,7 +50,7 @@ body,
   margin-right: 0.25rem;
 }
 
-@media (prefers-color-scheme: dark) {
+@variant dark {
   .rjsf input[type="text"],
   .rjsf input[type="number"],
   .rjsf input[type="color"],
