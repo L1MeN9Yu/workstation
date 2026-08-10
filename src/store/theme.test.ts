@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useTheme, initTheme, useInitTheme } from "./theme";
+import {
+  useTheme,
+  initTheme,
+  useInitTheme,
+  applyTheme,
+  persistTheme,
+} from "./theme";
 
 // node 26 provides an experimental global localStorage that conflicts with
 // jsdom's; polyfill window.localStorage explicitly for tests.
@@ -35,7 +41,7 @@ describe("theme store", () => {
     localStorage.clear();
     document.documentElement.classList.remove("dark");
     delete document.documentElement.dataset.theme;
-    useTheme.setState({ theme: "light" });
+    useTheme.setState({ theme: "light", _userTouched: false });
     delete window.__TAURI__;
     vi.restoreAllMocks();
   });
@@ -62,6 +68,24 @@ describe("theme store", () => {
     expect(useTheme.getState().theme).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(localStorage.getItem("workstation-theme")).toBeNull();
+  });
+
+  it("applyTheme toggles the dark class and dataset attribute", () => {
+    applyTheme("dark");
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    expect(document.documentElement.dataset.theme).toBe("dark");
+
+    applyTheme("light");
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it("persistTheme writes to localStorage in web environment", () => {
+    persistTheme("dark");
+    expect(localStorage.getItem("workstation-theme")).toBe("dark");
+
+    persistTheme("light");
+    expect(localStorage.getItem("workstation-theme")).toBe("light");
   });
 
   it("initTheme loads saved theme from localStorage", async () => {
@@ -145,6 +169,25 @@ describe("theme store", () => {
 
       await initTheme();
       expect(reloadedTheme.getState().theme).toBe("light");
+    });
+
+    it("initTheme does not override a toggle made before init completes", async () => {
+      vi.resetModules();
+      Object.defineProperty(window, "__TAURI__", {
+        value: {},
+        configurable: true,
+      });
+      vi.doMock("../lib/configStore", () => ({
+        readConfig: vi.fn(async () => ({ theme: "dark" })),
+        writeConfig: vi.fn(async () => undefined),
+      }));
+      const { initTheme, useTheme: reloadedTheme } = await import("./theme");
+
+      reloadedTheme.getState().toggle();
+      expect(reloadedTheme.getState().theme).toBe("dark");
+
+      await initTheme();
+      expect(reloadedTheme.getState().theme).toBe("dark");
     });
   });
 });
