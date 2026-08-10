@@ -27,6 +27,54 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
+      - run: npm run test
+
+  coverage:
+    name: Coverage (frontend + backend)
+    runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install Tauri system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential \
+            curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev
+      - run: npm ci
+      - name: Frontend coverage (vitest)
+        run: npm run test:coverage
+      - name: Backend coverage (llvm-cov)
+        working-directory: src-tauri
+        run: |
+          cargo llvm-cov --lib \
+            --ignore-filename-regex 'runtime\.rs' \
+            --fail-under-lines 99 \
+            --lcov --output-path ../coverage/backend.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/backend.info,coverage/lcov.info
+          flags: unit
+          fail_ci_if_error: false
 
   backend:
     name: Backend (fmt / clippy / test / build) - ${{ matrix.os }}
