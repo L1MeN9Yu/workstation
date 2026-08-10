@@ -8,6 +8,7 @@ import {
   type GhostyValueType,
 } from "../lib/ghostyText";
 import { writeGhostyConfig } from "../lib/cmuxConfig";
+import ReloadConfigButton from "./ReloadConfigButton";
 
 interface Entry {
   key: string;
@@ -210,6 +211,10 @@ export default function GhostyConfigForm({ content }: Props) {
           {saving ? "保存中..." : "保存"}
         </button>
         {status && <span className="text-sm text-green-600 dark:text-green-400">{status}</span>}
+      </div>
+
+      <div className="mt-3">
+        <ReloadConfigButton />
       </div>
     </div>
   );
