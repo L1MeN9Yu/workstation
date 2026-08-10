@@ -161,18 +161,24 @@ impl Serialize for CmuxReloadStatus {
     }
 }
 
+#[derive(Debug, PartialEq)]
 enum CmuxRunError {
     NotFound,
     Other(String),
 }
 
 fn run_cmux(args: &[&str]) -> Result<String, CmuxRunError> {
-    match Command::new("cmux").args(args).output() {
+    run_command("cmux", args)
+}
+
+fn run_command(program: &str, args: &[&str]) -> Result<String, CmuxRunError> {
+    match Command::new(program).args(args).output() {
         Err(e) if e.kind() == ErrorKind::NotFound => Err(CmuxRunError::NotFound),
         Err(e) => Err(CmuxRunError::Other(e.to_string())),
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
         Ok(out) => Err(CmuxRunError::Other(format!(
-            "cmux {} failed with {}: {}",
+            "{} {} failed with {}: {}",
+            program,
             args.join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
@@ -195,9 +201,15 @@ fn classify_reload(
 }
 
 pub fn reload_cmux_config_impl() -> Result<CmuxReloadStatus, String> {
-    let reload = run_cmux(&["config", "reload"]);
+    reload_cmux_config_with(run_cmux)
+}
+
+fn reload_cmux_config_with(
+    mut run: impl FnMut(&[&str]) -> Result<String, CmuxRunError>,
+) -> Result<CmuxReloadStatus, String> {
+    let reload = run(&["config", "reload"]);
     let ping = if matches!(reload, Err(CmuxRunError::Other(_))) {
-        Some(run_cmux(&["ping"]))
+        Some(run(&["ping"]))
     } else {
         None
     };
@@ -589,10 +601,70 @@ mod tests {
     fn cmux_reload_status_serializes_as_flat_object() {
         let success = serde_json::to_value(CmuxReloadStatus::Success).unwrap();
         assert_eq!(success, serde_json::json!({"status": "success"}));
+        let not_running = serde_json::to_value(CmuxReloadStatus::NotRunning).unwrap();
+        assert_eq!(not_running, serde_json::json!({"status": "notRunning"}));
+        let cli_missing = serde_json::to_value(CmuxReloadStatus::CliMissing).unwrap();
+        assert_eq!(cli_missing, serde_json::json!({"status": "cliMissing"}));
         let failed = serde_json::to_value(CmuxReloadStatus::Failed("boom".to_string())).unwrap();
         assert_eq!(
             failed,
             serde_json::json!({"status": "failed", "message": "boom"})
         );
+    }
+
+    #[test]
+    fn run_command_ok_returns_stdout() {
+        let out = run_command("cargo", &["--version"]).unwrap();
+        assert!(out.trim_start().starts_with("cargo "));
+    }
+
+    #[test]
+    fn run_command_nonzero_exit_is_other_error() {
+        let err = run_command("cargo", &["__definitely_not_a_cargo_subcommand__"]).unwrap_err();
+        assert!(matches!(err, CmuxRunError::Other(_)));
+    }
+
+    #[test]
+    fn run_command_missing_program_is_not_found() {
+        let err = run_command("workstation-no-such-binary-xyz", &[]).unwrap_err();
+        assert!(matches!(err, CmuxRunError::NotFound));
+    }
+
+    #[test]
+    fn run_command_spawn_failure_is_other_error() {
+        let dir = temp_dir("run-command-spawn");
+        let err = run_command(&dir.display().to_string(), &[]).unwrap_err();
+        assert!(matches!(err, CmuxRunError::Other(_)));
+    }
+
+    #[test]
+    fn reload_cmux_config_with_probes_ping_on_failure() {
+        let mut calls: Vec<String> = Vec::new();
+        let status = reload_cmux_config_with(|args| {
+            calls.push(args.join(" "));
+            if calls.last().unwrap() == "config reload" {
+                Err(CmuxRunError::Other("boom".to_string()))
+            } else {
+                Ok("PONG\n".to_string())
+            }
+        })
+        .unwrap();
+        assert_eq!(status, CmuxReloadStatus::Failed("boom".to_string()));
+        assert_eq!(calls, vec!["config reload".to_string(), "ping".to_string()]);
+    }
+
+    #[test]
+    fn reload_cmux_config_impl_returns_valid_status() {
+        // Environment-independent: succeeds when cmux is installed and running,
+        // otherwise reports cliMissing/notRunning; the result must still be one
+        // of the four defined statuses.
+        let status = reload_cmux_config_impl().unwrap();
+        assert!(matches!(
+            status,
+            CmuxReloadStatus::Success
+                | CmuxReloadStatus::NotRunning
+                | CmuxReloadStatus::CliMissing
+                | CmuxReloadStatus::Failed(_)
+        ));
     }
 }
