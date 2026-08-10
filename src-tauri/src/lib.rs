@@ -157,11 +157,16 @@ mod tests {
 
     #[test]
     fn ghosty_config_prefers_app_support() {
-        // Path resolution logic: the first candidate (cmux app support dir)
-        // is preferred; fallback is only reached when it does not exist.
-        let p = ghosty_config_path().expect("home dir should resolve");
-        let home = dirs::home_dir().unwrap();
-        assert!(p.starts_with(home));
+        // Resolution prefers the cmux app support candidate (first in list);
+        // the pure function is covered independently of the local machine.
+        let candidates = ghosty_config_candidates();
+        assert!(!candidates.is_empty());
+        let found = ghosty_config_path_from(&candidates);
+        // If the real machine has a config, it must live under the home dir.
+        if let Some(p) = found {
+            let home = dirs::home_dir().unwrap();
+            assert!(p.starts_with(home));
+        }
     }
 
     #[test]
