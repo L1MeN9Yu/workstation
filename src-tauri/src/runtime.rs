@@ -2,7 +2,7 @@ use tauri::AppHandle;
 
 use crate::{
     cmux_config_path, ghosty_config_path, read_cmux_config_at, read_config as read_config_impl,
-    read_ghosty_config_at, write_config as write_config_impl, write_cmux_config_at,
+    read_ghosty_config_at, write_cmux_config_at, write_config as write_config_impl,
     write_ghosty_config_at, CmuxConfigFile,
 };
 

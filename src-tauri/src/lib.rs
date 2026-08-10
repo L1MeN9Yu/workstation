@@ -437,4 +437,32 @@ mod tests {
             .collect();
         assert!(leftover.is_empty(), "temp files left behind");
     }
+
+    #[test]
+    fn write_json_file_skips_create_dir_when_no_parent() {
+        // "/" has no parent; write fails harmlessly on the root entry.
+        let err = write_json_file(Path::new("/"), &serde_json::json!({"x": 1})).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn write_text_file_atomic_skips_create_dir_when_no_parent() {
+        let err = write_text_file_atomic(Path::new("/"), "hi").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn write_text_file_atomic_cleans_up_tmp_on_rename_failure() {
+        let dir = temp_dir("atomic-rename-fail");
+        let path = dir.join("target");
+        fs::create_dir_all(&path).unwrap();
+        let err = write_text_file_atomic(&path, "hi").unwrap_err();
+        assert!(!err.is_empty());
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp-"))
+            .collect();
+        assert!(leftover.is_empty(), "temp files left behind");
+    }
 }
