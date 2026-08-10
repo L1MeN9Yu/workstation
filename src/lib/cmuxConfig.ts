@@ -1,27 +1,15 @@
-// Reserved structures for cmux / ghosty configuration support.
-//
-// NOTE: This is a skeleton placeholder scoped to the framework setup change.
-// Actual parsing/editing of cmux (ghosty) hand-written config files will be
-// implemented in a follow-up change. Keep this file as the extension point.
+import { invoke } from "@tauri-apps/api/core";
 
-export interface GhostyConfigMeta {
-  /** Human-readable name shown in the UI */
-  label: string;
-  /** Where the hand-written config file lives on disk */
+export interface CmuxConfigFile {
+  kind: "cmux" | "ghosty";
   path: string;
-  /** Whether the file currently exists */
-  exists: boolean;
-  /** Raw file content (unparsed) */
-  raw: string | null;
+  content: string;
 }
 
-export interface GhostyConfigDescriptor {
-  /** Stable identifier for this config */
-  id: string;
-  meta: GhostyConfigMeta;
+export function readCmuxConfig(): Promise<CmuxConfigFile> {
+  return invoke("read_cmux_config");
 }
 
-/** Placeholder: lists ghosty config files we know about. */
-export function listGhostyConfigs(): GhostyConfigDescriptor[] {
-  return [];
+export function readGhostyConfig(): Promise<CmuxConfigFile> {
+  return invoke("read_ghosty_config");
 }

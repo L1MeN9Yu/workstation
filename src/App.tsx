@@ -1,27 +1,9 @@
 import { useEffect, useState } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import Home from "./pages/Home";
 import CmuxConfig from "./pages/CmuxConfig";
-import DevTools from "./pages/DevTools";
 import { toolRegistry } from "./lib/toolsRegistry";
 import { useTheme, useInitTheme } from "./store/theme";
-
-interface NavEntry {
-  path: string;
-  label: string;
-}
-
-const staticNav: NavEntry[] = [
-  { path: "/", label: "任务" },
-  { path: "/cmux", label: "cmux" },
-  { path: "/tools", label: "工具集" },
-];
-
-const toolNav: NavEntry[] = toolRegistry.map((t) => ({
-  path: t.path,
-  label: t.label,
-}));
 
 export default function App() {
   useInitTheme();
@@ -58,29 +40,25 @@ export default function App() {
           </button>
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-2">
-          {staticNav.map((n) => (
-            <NavLink
-              key={n.path}
-              to={n.path}
-              end={n.path === "/"}
-              className={({ isActive }) =>
-                `block rounded-md px-3 py-2 text-sm ${
-                  isActive
-                    ? "bg-blue-600 font-medium text-white"
-                    : "text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
-                }`
-              }
-            >
-              {n.label}
-            </NavLink>
-          ))}
+          <NavLink
+            to="/cmux"
+            className={({ isActive }) =>
+              `block rounded-md px-3 py-2 text-sm ${
+                isActive
+                  ? "bg-blue-600 font-medium text-white"
+                  : "text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+              }`
+            }
+          >
+            cmux 配置
+          </NavLink>
           <div className="pt-2 text-xs font-medium uppercase tracking-wide text-gray-400">
             研发工具
           </div>
-          {toolNav.map((n) => (
+          {toolRegistry.map((t) => (
             <NavLink
-              key={n.path}
-              to={n.path}
+              key={t.id}
+              to={t.path}
               className={({ isActive }) =>
                 `block rounded-md px-3 py-2 text-sm ${
                   isActive
@@ -89,7 +67,7 @@ export default function App() {
                 }`
               }
             >
-              {n.label}
+              {t.label}
             </NavLink>
           ))}
         </nav>
@@ -99,9 +77,8 @@ export default function App() {
       </aside>
       <main className="flex-1 overflow-y-auto">
         <Routes>
-          <Route path="/" element={<Home />} />
+          <Route path="/" element={<Navigate to="/cmux" replace />} />
           <Route path="/cmux" element={<CmuxConfig />} />
-          <Route path="/tools" element={<DevTools />} />
           {toolRegistry.map((t) => (
             <Route key={t.id} path={t.path} element={<t.component />} />
           ))}
