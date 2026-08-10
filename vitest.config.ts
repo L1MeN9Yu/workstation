@@ -11,7 +11,7 @@ export default defineConfig({
     globals: true,
     include: ["src/**/*.test.{ts,tsx}"],
     coverage: {
-      provider: "v8",
+      provider: "istanbul",
       include: ["src/lib/**/*.{ts,tsx}", "src/store/**/*.{ts,tsx}"],
       exclude: [
         "**/*.test.{ts,tsx}",

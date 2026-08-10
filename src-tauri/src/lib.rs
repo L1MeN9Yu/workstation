@@ -82,6 +82,39 @@ fn read_text_file(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
+fn write_text_file_atomic(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+pub fn write_cmux_config_at(path: &Path, content: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("cmux config file not found: {}", path.display()));
+    }
+    write_text_file_atomic(path, content)
+}
+
+pub fn write_ghosty_config_at(path: &Path, content: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("ghosty config file not found: {}", path.display()));
+    }
+    write_text_file_atomic(path, content)
+}
+
 pub fn read_cmux_config_at(path: &Path) -> Result<CmuxConfigFile, String> {
     let content = read_text_file(path)?;
     Ok(CmuxConfigFile {
@@ -353,5 +386,55 @@ mod tests {
     fn read_ghosty_config_at_errors_on_missing_file() {
         let dir = temp_dir("ghosty-at-missing");
         assert!(read_ghosty_config_at(&dir.join("config.ghostty")).is_err());
+    }
+
+    #[test]
+    fn write_cmux_config_at_roundtrips_content() {
+        let dir = temp_dir("cmux-write");
+        let path = dir.join("cmux.json");
+        fs::write(&path, "{\"schemaVersion\": 1}").unwrap();
+        write_cmux_config_at(&path, "{\"schemaVersion\": 2}").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"schemaVersion\": 2}");
+    }
+
+    #[test]
+    fn write_cmux_config_at_errors_on_missing_file() {
+        let dir = temp_dir("cmux-write-missing");
+        let err = write_cmux_config_at(&dir.join("cmux.json"), "{}").unwrap_err();
+        assert!(err.contains("cmux config file not found"));
+    }
+
+    #[test]
+    fn write_ghosty_config_at_roundtrips_content() {
+        let dir = temp_dir("ghosty-write");
+        let path = dir.join("config.ghostty");
+        fs::write(&path, "background-opacity = 0.75").unwrap();
+        write_ghosty_config_at(&path, "background-opacity = 0.5").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "background-opacity = 0.5"
+        );
+    }
+
+    #[test]
+    fn write_ghosty_config_at_errors_on_missing_file() {
+        let dir = temp_dir("ghosty-write-missing");
+        let err = write_ghosty_config_at(&dir.join("config.ghostty"), "key = v").unwrap_err();
+        assert!(err.contains("ghosty config file not found"));
+    }
+
+    #[test]
+    fn write_text_file_atomic_creates_parent_dirs() {
+        let dir = temp_dir("atomic-parents");
+        let path = dir.join("nested").join("deep").join("config");
+        write_text_file_atomic(&path, "hello").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
+        // no temp leftovers
+        let leftover: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp-"))
+            .collect();
+        assert!(leftover.is_empty(), "temp files left behind");
     }
 }
