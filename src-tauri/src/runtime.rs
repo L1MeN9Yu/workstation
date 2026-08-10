@@ -2,7 +2,8 @@ use tauri::AppHandle;
 
 use crate::{
     cmux_config_path, ghosty_config_path, read_cmux_config_at, read_config as read_config_impl,
-    read_ghosty_config_at, write_config as write_config_impl, CmuxConfigFile,
+    read_ghosty_config_at, write_cmux_config_at, write_config as write_config_impl,
+    write_ghosty_config_at, CmuxConfigFile,
 };
 
 #[tauri::command]
@@ -32,6 +33,18 @@ pub fn read_ghosty_config() -> Result<CmuxConfigFile, String> {
     read_ghosty_config_at(&path)
 }
 
+#[tauri::command]
+pub fn write_cmux_config(content: String) -> Result<(), String> {
+    let path = cmux_config_path().ok_or_else(|| "cannot resolve cmux config dir".to_string())?;
+    write_cmux_config_at(&path, &content)
+}
+
+#[tauri::command]
+pub fn write_ghosty_config(content: String) -> Result<(), String> {
+    let path = ghosty_config_path().ok_or_else(|| "ghosty config file not found".to_string())?;
+    write_ghosty_config_at(&path, &content)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -41,7 +54,9 @@ pub fn run() {
             write_config,
             app_version,
             read_cmux_config,
-            read_ghosty_config
+            read_ghosty_config,
+            write_cmux_config,
+            write_ghosty_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,6 +2,8 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   readCmuxConfig,
   readGhostyConfig,
+  writeCmuxConfig,
+  writeGhostyConfig,
   type CmuxConfigFile,
 } from "./cmuxConfig";
 import { invoke } from "@tauri-apps/api/core";
@@ -42,5 +44,21 @@ describe("cmuxConfig", () => {
   it("propagates rejection from invoke", async () => {
     vi.mocked(invoke).mockRejectedValue(new Error("file not found"));
     await expect(readGhostyConfig()).rejects.toThrow("file not found");
+  });
+
+  it("writeCmuxConfig invokes write_cmux_config with content", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await writeCmuxConfig('{"schemaVersion": 2}');
+    expect(invoke).toHaveBeenCalledWith("write_cmux_config", {
+      content: '{"schemaVersion": 2}',
+    });
+  });
+
+  it("writeGhostyConfig invokes write_ghosty_config with content", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await writeGhostyConfig("background-opacity = 0.5");
+    expect(invoke).toHaveBeenCalledWith("write_ghosty_config", {
+      content: "background-opacity = 0.5",
+    });
   });
 });

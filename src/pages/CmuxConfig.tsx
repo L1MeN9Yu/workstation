@@ -4,6 +4,8 @@ import {
   readGhostyConfig,
   type CmuxConfigFile,
 } from "../lib/cmuxConfig";
+import CmuxConfigForm from "../components/CmuxConfigForm";
+import GhostyConfigForm from "../components/GhostyConfigForm";
 
 type Tab = "cmux" | "ghosty";
 
@@ -67,7 +69,13 @@ export default function CmuxConfig() {
           <div className="border-b border-gray-200 px-4 py-2 text-xs text-gray-500 dark:border-gray-700">
             {active.path}
           </div>
-          <pre className="max-h-[480px] overflow-auto p-4 text-sm">{active.content || "（空配置）"}</pre>
+          <div className="p-4">
+            {active.kind === "cmux" ? (
+              <CmuxConfigForm content={active.content} />
+            ) : (
+              <GhostyConfigForm content={active.content} />
+            )}
+          </div>
         </div>
       ) : (
         <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">

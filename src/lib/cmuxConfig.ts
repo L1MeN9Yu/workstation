@@ -13,3 +13,11 @@ export function readCmuxConfig(): Promise<CmuxConfigFile> {
 export function readGhostyConfig(): Promise<CmuxConfigFile> {
   return invoke("read_ghosty_config");
 }
+
+export function writeCmuxConfig(content: string): Promise<void> {
+  return invoke("write_cmux_config", { content });
+}
+
+export function writeGhostyConfig(content: string): Promise<void> {
+  return invoke("write_ghosty_config", { content });
+}
