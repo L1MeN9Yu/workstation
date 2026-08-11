@@ -2,6 +2,8 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   readCmuxConfig,
   readGhostyConfig,
+  reloadCmuxConfig,
+  reloadStatusMessage,
   writeCmuxConfig,
   writeGhostyConfig,
   type CmuxConfigFile,
@@ -60,5 +62,33 @@ describe("cmuxConfig", () => {
     expect(invoke).toHaveBeenCalledWith("write_ghosty_config", {
       content: "background-opacity = 0.5",
     });
+  });
+
+  it("reloadCmuxConfig invokes reload_cmux_config and returns status", async () => {
+    vi.mocked(invoke).mockResolvedValue({ status: "success" });
+    const result = await reloadCmuxConfig();
+    expect(invoke).toHaveBeenCalledWith("reload_cmux_config");
+    expect(result).toEqual({ status: "success" });
+  });
+
+  it("reloadStatusMessage maps success", () => {
+    expect(reloadStatusMessage({ status: "success" })).toContain("已生效");
+  });
+
+  it("reloadStatusMessage maps notRunning", () => {
+    expect(reloadStatusMessage({ status: "notRunning" })).toContain("未运行");
+  });
+
+  it("reloadStatusMessage maps cliMissing", () => {
+    expect(reloadStatusMessage({ status: "cliMissing" })).toContain("未找到 cmux 命令");
+  });
+
+  it("reloadStatusMessage maps failed with message", () => {
+    const msg = reloadStatusMessage({ status: "failed", message: "boom" });
+    expect(msg).toContain("boom");
+  });
+
+  it("reloadStatusMessage maps failed without message", () => {
+    expect(reloadStatusMessage({ status: "failed" })).toContain("未知错误");
   });
 });

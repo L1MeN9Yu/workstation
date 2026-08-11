@@ -13,6 +13,7 @@ import {
   type DirtyField,
 } from "../lib/cmuxJsonc";
 import { writeCmuxConfig } from "../lib/cmuxConfig";
+import ReloadConfigButton from "./ReloadConfigButton";
 
 const RENDER_SCHEMA = cmuxSchema as unknown as RJSFSchema;
 
@@ -259,6 +260,10 @@ export default function CmuxConfigForm({ content }: Props) {
           {saving ? "保存中..." : "保存"}
         </button>
         {status && <span className="text-sm text-green-600 dark:text-green-400">{status}</span>}
+      </div>
+
+      <div className="mt-3">
+        <ReloadConfigButton />
       </div>
     </div>
   );
