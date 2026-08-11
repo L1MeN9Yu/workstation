@@ -759,7 +759,6 @@ mod tests {
             keywords: String::new(),
             random: false,
             page: 2,
-            ..Default::default()
         };
         let src = SourceSettings::default();
         tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
