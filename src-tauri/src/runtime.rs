@@ -53,10 +53,31 @@ pub fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
 }
 
 fn wallpaper_settings_from_config() -> WallpaperSettings {
-    read_config_impl("wallpaper".to_string())
-        .ok()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
+    let raw = read_config_impl("wallpaper".to_string());
+    match raw {
+        Ok(value) => {
+            log::debug!("wallpaper config raw: {value}");
+            match serde_json::from_value::<WallpaperSettings>(value) {
+                Ok(settings) => {
+                    log::debug!(
+                        "wallpaper config parsed: proxy={:?} download_dir={:?} sources={}",
+                        settings.proxy,
+                        settings.download_dir,
+                        settings.sources.len()
+                    );
+                    settings
+                }
+                Err(e) => {
+                    log::error!("wallpaper config parse failed: {e}, falling back to defaults");
+                    WallpaperSettings::default()
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("wallpaper config read failed: {e}, falling back to defaults");
+            WallpaperSettings::default()
+        }
+    }
 }
 
 #[tauri::command]
@@ -69,8 +90,14 @@ pub async fn download_wallpaper(item: WallpaperItem) -> Result<String, String> {
     wallpaper::download_wallpaper(item, wallpaper_settings_from_config()).await
 }
 
+#[tauri::command]
+pub async fn fetch_remote_image(url: String) -> Result<String, String> {
+    wallpaper::fetch_thumb_image(url, wallpaper_settings_from_config()).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -83,7 +110,8 @@ pub fn run() {
             write_ghosty_config,
             reload_cmux_config,
             search_wallpapers,
-            download_wallpaper
+            download_wallpaper,
+            fetch_remote_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

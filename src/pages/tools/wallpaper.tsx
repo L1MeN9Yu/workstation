@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore, useState } from "react";
 import { ToolPage } from "../ToolPage";
 import {
   applyWallpaperToGhosty,
   downloadWallpaper,
+  fetchWallpaperThumb,
   loadWallpaperSettings,
   saveWallpaperSettings,
   searchWallpapers,
@@ -18,6 +19,76 @@ import {
 interface SearchError {
   source: string;
   message: string;
+}
+
+const thumbCache = new Map<string, string>();
+const thumbFailed = new Set<string>();
+const thumbPending = new Set<string>();
+const thumbListeners = new Set<() => void>();
+let thumbVersion = 0;
+
+function notifyThumb(): void {
+  thumbVersion += 1;
+  for (const listener of thumbListeners) listener();
+}
+
+function subscribeThumb(listener: () => void): () => void {
+  thumbListeners.add(listener);
+  return () => {
+    thumbListeners.delete(listener);
+  };
+}
+
+function getThumbVersion(): number {
+  return thumbVersion;
+}
+
+function ensureThumb(url: string): void {
+  if (thumbCache.has(url) || thumbFailed.has(url) || thumbPending.has(url)) {
+    return;
+  }
+  thumbPending.add(url);
+  fetchWallpaperThumb(url)
+    .then((result) => {
+      thumbCache.set(url, result);
+    })
+    .catch(() => {
+      thumbFailed.add(url);
+    })
+    .finally(() => {
+      thumbPending.delete(url);
+      notifyThumb();
+    });
+}
+
+interface ProxiedThumbProps {
+  url: string;
+  alt: string;
+  className: string;
+}
+
+function ProxiedThumb({ url, alt, className }: ProxiedThumbProps) {
+  useSyncExternalStore(subscribeThumb, getThumbVersion, getThumbVersion);
+  useEffect(() => {
+    ensureThumb(url);
+  }, [url]);
+
+  if (thumbFailed.has(url)) {
+    return (
+      <div className={`flex items-center justify-center bg-gray-100 text-xs text-gray-400 dark:bg-gray-800 ${className}`}>
+        加载失败
+      </div>
+    );
+  }
+  const dataUrl = thumbCache.get(url);
+  if (!dataUrl) {
+    return (
+      <div className={`flex items-center justify-center bg-gray-100 text-xs text-gray-400 dark:bg-gray-800 ${className}`}>
+        加载中...
+      </div>
+    );
+  }
+  return <img src={dataUrl} alt={alt} className={className} />;
 }
 
 interface SourceFieldDef {
@@ -70,6 +141,8 @@ export default function WallpaperTool() {
   const [settings, setSettings] = useState<WallpaperSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const pageRef = useRef(1);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,27 +156,44 @@ export default function WallpaperTool() {
 
   const meta = useMemo(() => getSourceMeta(source), [source]);
 
-  async function handleSearch(random: boolean) {
+  async function runSearch(random: boolean, page: number): Promise<void> {
     if (!settings) return;
     setSearching(true);
     setStatus(null);
     setErrors([]);
-    setItems([]);
     try {
       const result = await searchWallpapers({
         source,
         keywords: random ? "" : keywords,
         random,
+        page,
       });
-      setItems(result);
-      if (result.length === 0) {
+      setItems((prev) => (page > 1 ? [...prev, ...result] : result));
+      setHasMore(result.length > 0);
+      if (result.length === 0 && page === 1) {
         setStatus("没有找到满足条件的壁纸（分辨率需 ≥ 1920 宽）");
       }
     } catch (e) {
-      setErrors([{ source, message: String(e) }]);
+      if (page === 1) {
+        setErrors([{ source, message: String(e) }]);
+      } else {
+        setStatus(`加载更多失败：${String(e)}`);
+      }
     } finally {
       setSearching(false);
     }
+  }
+
+  async function handleSearch(random: boolean) {
+    pageRef.current = 1;
+    setItems([]);
+    await runSearch(random, 1);
+  }
+
+  async function handleLoadMore() {
+    const next = pageRef.current + 1;
+    pageRef.current = next;
+    await runSearch(false, next);
   }
 
   async function handleApply(item: WallpaperItem) {
@@ -167,6 +257,8 @@ export default function WallpaperTool() {
                 setErrors([]);
                 setItems([]);
                 setStatus(null);
+                setHasMore(false);
+                pageRef.current = 1;
               }}
               className={`rounded-md px-3 py-1 text-sm ${
                 source === s.id
@@ -180,16 +272,24 @@ export default function WallpaperTool() {
         </div>
         <button
           onClick={() => setShowSettings((v) => !v)}
-          className="rounded-md border border-gray-300 px-3 py-1 text-sm dark:border-gray-600"
+          className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white"
         >
           设置
         </button>
       </div>
 
       {meta && (
-        <p className="mb-3 text-xs text-gray-500">
-          {meta.description}
-        </p>
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <p className="text-xs text-gray-500">{meta.description}</p>
+          <a
+            href={meta.homepage}
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm text-blue-600 underline hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+          >
+            {meta.label} 官网
+          </a>
+        </div>
       )}
 
       {showSettings && settings && (
@@ -317,10 +417,9 @@ export default function WallpaperTool() {
               key={item.id}
               className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
-              <img
-                src={item.thumb_url}
+              <ProxiedThumb
+                url={item.thumb_url}
                 alt={item.id}
-                loading="lazy"
                 className="h-32 w-full object-cover"
               />
               <div className="flex items-center justify-between p-2 text-xs">
@@ -337,6 +436,18 @@ export default function WallpaperTool() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {items.length > 0 && hasMore && (
+        <div className="mt-4 flex justify-center">
+          <button
+            onClick={() => void handleLoadMore()}
+            disabled={searching}
+            className="rounded-md bg-gray-200 px-6 py-2 text-sm text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
+          >
+            {searching ? "加载中..." : "加载更多"}
+          </button>
         </div>
       )}
 

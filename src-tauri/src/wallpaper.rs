@@ -5,11 +5,34 @@ use std::path::{Path, PathBuf};
 
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 const USER_AGENT: &str = "workstation-wallpaper/0.1";
 const DEFAULT_MIN_WIDTH: u32 = 1920;
 const DEFAULT_MIN_HEIGHT: u32 = 1080;
+
+fn de_u32_string<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::Number(n)) => n
+            .as_u64()
+            .map(|v| Some(v as u32))
+            .ok_or_else(|| serde::de::Error::custom("expected u32 number")),
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(serde_json::Value::String(s)) => s
+            .trim()
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| serde::de::Error::custom(format!("invalid u32 string: {s}"))),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected number or numeric string, got {other}"
+        ))),
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WallpaperItem {
@@ -21,13 +44,15 @@ pub struct WallpaperItem {
     pub height: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct SearchQuery {
     pub source: String,
     #[serde(default)]
     pub keywords: String,
     #[serde(default)]
     pub random: bool,
+    #[serde(default)]
+    pub page: u32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -37,7 +62,9 @@ pub struct SourceSettings {
     pub login: Option<String>,
     pub categories: Option<String>,
     pub purity: Option<String>,
+    #[serde(deserialize_with = "de_u32_string")]
     pub min_width: Option<u32>,
+    #[serde(deserialize_with = "de_u32_string")]
     pub min_height: Option<u32>,
     pub rating: Option<String>,
 }
@@ -61,8 +88,11 @@ impl WallpaperSettings {
 fn build_client(proxy: Option<&str>) -> Result<Client, String> {
     let mut builder = Client::builder().user_agent(USER_AGENT);
     if let Some(p) = proxy.filter(|p| !p.trim().is_empty()) {
+        log::info!("using proxy: {p}");
         builder =
             builder.proxy(reqwest::Proxy::all(p).map_err(|e| format!("invalid proxy url: {e}"))?);
+    } else {
+        log::warn!("no proxy configured, connecting directly");
     }
     builder
         .build()
@@ -77,6 +107,14 @@ pub async fn search_wallpapers(
     query: SearchQuery,
     settings: WallpaperSettings,
 ) -> Result<Vec<WallpaperItem>, String> {
+    log::info!(
+        "search_wallpapers source={} keywords={:?} random={} page={} proxy={:?}",
+        query.source,
+        query.keywords,
+        query.random,
+        query.page,
+        settings.proxy
+    );
     let client = build_client(settings.proxy.as_deref())?;
     let src = settings.source(&query.source);
     let base = settings
@@ -130,6 +168,9 @@ async fn search_wallhaven(
         pairs.append_pair("categories", src.categories.as_deref().unwrap_or("010"));
         pairs.append_pair("purity", src.purity.as_deref().unwrap_or("100"));
         pairs.append_pair("atleast", &format!("{min_width}x{min_height}"));
+        if query.page > 1 {
+            pairs.append_pair("page", &query.page.to_string());
+        }
         if let Some(key) = src.api_key.as_deref().filter(|k| !k.is_empty()) {
             pairs.append_pair("apikey", key);
         }
@@ -200,6 +241,9 @@ async fn search_danbooru(
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("tags", &tags.join(" "));
         pairs.append_pair("limit", "24");
+        if query.page > 1 {
+            pairs.append_pair("page", &query.page.to_string());
+        }
         if query.random {
             pairs.append_pair("random", "true");
         }
@@ -271,6 +315,9 @@ async fn search_safebooru(
         pairs.append_pair("q", "index");
         pairs.append_pair("json", "1");
         pairs.append_pair("limit", "24");
+        if query.page > 1 {
+            pairs.append_pair("pid", &((query.page - 1) * 24).to_string());
+        }
         let kw = query.keywords.trim();
         if !kw.is_empty() {
             pairs.append_pair("tags", kw);
@@ -398,18 +445,64 @@ pub fn default_download_dir() -> PathBuf {
     default_download_dir_from(dirs::home_dir())
 }
 
+const MAX_THUMB_BYTES: usize = 5 * 1024 * 1024;
+
+pub async fn fetch_thumb_image(url: String, settings: WallpaperSettings) -> Result<String, String> {
+    log::info!("fetch thumb: {url}");
+    let client = build_client(settings.proxy.as_deref())?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("thumb request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(http_error(resp.status(), "thumb"));
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("thumb read failed: {e}"))?;
+    validate_thumb_size(&bytes)?;
+    let mime = if content_type.contains("png") {
+        "image/png"
+    } else if content_type.contains("webp") {
+        "image/webp"
+    } else if content_type.contains("gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
+    };
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+fn validate_thumb_size(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_THUMB_BYTES {
+        return Err(format!("thumb image too large: {} bytes", bytes.len()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     struct MockServer {
         addr: String,
         counter: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<String>>>,
     }
 
     impl MockServer {
@@ -418,7 +511,8 @@ mod tests {
             let addr = listener.local_addr().unwrap().to_string();
             let responses = Arc::new(responses);
             let counter = Arc::new(AtomicUsize::new(0));
-            let (r2, c2) = (responses.clone(), counter.clone());
+            let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let (r2, c2, reqs) = (responses.clone(), counter.clone(), requests.clone());
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { break };
@@ -427,10 +521,16 @@ mod tests {
                         r2.get(idx)
                             .copied()
                             .unwrap_or((200, "[]", "application/json"));
-                    let _ = serve(&mut stream, status, body, content_type);
+                    if let Ok(first_line) = serve(&mut stream, status, body, content_type) {
+                        reqs.lock().unwrap().push(first_line);
+                    }
                 }
             });
-            Self { addr, counter }
+            Self {
+                addr,
+                counter,
+                requests,
+            }
         }
 
         fn ok(body: &'static str) -> Self {
@@ -444,6 +544,17 @@ mod tests {
         fn hit_count(&self) -> usize {
             self.counter.load(Ordering::SeqCst)
         }
+
+        fn request_lines(&self) -> Vec<String> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let lines = self.requests.lock().unwrap().clone();
+                if lines.len() >= self.hit_count() || std::time::Instant::now() > deadline {
+                    return lines;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
     }
 
     fn serve(
@@ -451,10 +562,10 @@ mod tests {
         status: u16,
         body: &str,
         content_type: &str,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<String> {
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut request_line = String::new();
-        let _ = reader.read_line(&mut request_line);
+        reader.read_line(&mut request_line)?;
         for line in reader.by_ref().lines() {
             let line = line?;
             if line.is_empty() {
@@ -467,7 +578,8 @@ mod tests {
             body.len()
         );
         stream.write_all(response.as_bytes())?;
-        stream.flush()
+        stream.flush()?;
+        Ok(request_line.trim().to_string())
     }
 
     fn read_body(path: &Path) -> String {
@@ -582,6 +694,7 @@ mod tests {
                 source: "nope".to_string(),
                 keywords: String::new(),
                 random: false,
+                ..Default::default()
             },
             settings,
         );
@@ -601,6 +714,7 @@ mod tests {
             source: "wallhaven".to_string(),
             keywords: "anime".to_string(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings {
             api_key: Some("k1".to_string()),
@@ -634,6 +748,7 @@ mod tests {
             source: "wallhaven".to_string(),
             keywords: String::new(),
             random: true,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let items = tauri::async_runtime::block_on(search_wallhaven(
@@ -648,6 +763,42 @@ mod tests {
     }
 
     #[test]
+    fn search_wallhaven_includes_page_param_when_gt_one() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+            page: 2,
+        };
+        let src = SourceSettings::default();
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("page=2"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn search_wallhaven_omits_page_param_on_first_page() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+            ..Default::default()
+        };
+        let src = SourceSettings::default();
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("page="), "got: {}", lines[0]);
+    }
+
+    #[test]
     fn search_wallhaven_http_error_is_propagated() {
         let server = MockServer::new(vec![(403, r#"{"error":"denied"}"#, "text/plain")]);
         let client = build_client(None).unwrap();
@@ -655,6 +806,7 @@ mod tests {
             source: "wallhaven".to_string(),
             keywords: String::new(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let err = tauri::async_runtime::block_on(search_wallhaven(
@@ -675,6 +827,7 @@ mod tests {
             source: "wallhaven".to_string(),
             keywords: String::new(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let err = tauri::async_runtime::block_on(search_wallhaven(
@@ -699,6 +852,7 @@ mod tests {
             source: "danbooru".to_string(),
             keywords: "landscape".to_string(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let items = tauri::async_runtime::block_on(search_danbooru(
@@ -725,6 +879,7 @@ mod tests {
             source: "danbooru".to_string(),
             keywords: String::new(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings {
             rating: Some("sensitive".to_string()),
@@ -753,6 +908,7 @@ mod tests {
             source: "safebooru".to_string(),
             keywords: "scenery".to_string(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let items = tauri::async_runtime::block_on(search_safebooru(
@@ -775,6 +931,7 @@ mod tests {
             source: "safebooru".to_string(),
             keywords: String::new(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let err = tauri::async_runtime::block_on(search_safebooru(
@@ -785,6 +942,84 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("safebooru"));
+    }
+
+    #[test]
+    fn search_safebooru_includes_pid_offset_when_page_gt_one() {
+        let server = MockServer::ok(r#"[]"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "safebooru".to_string(),
+            keywords: String::new(),
+            random: false,
+            page: 2,
+        };
+        let src = SourceSettings::default();
+        tauri::async_runtime::block_on(search_safebooru(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("pid=24"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn fetch_thumb_image_returns_base64_data_url() {
+        let server = MockServer::new(vec![(200, "png-bytes", "image/png")]);
+        let settings = WallpaperSettings {
+            proxy: None,
+            download_dir: None,
+            sources: HashMap::new(),
+            base_urls: HashMap::new(),
+        };
+        let data_url =
+            tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings)).unwrap();
+        assert!(data_url.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn fetch_thumb_image_rejects_http_error() {
+        let server = MockServer::new(vec![(404, "nope", "text/plain")]);
+        let settings = WallpaperSettings {
+            proxy: None,
+            download_dir: None,
+            sources: HashMap::new(),
+            base_urls: HashMap::new(),
+        };
+        let err = tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings))
+            .unwrap_err();
+        assert!(err.contains("thumb"));
+    }
+
+    #[test]
+    fn fetch_thumb_image_maps_mime_types() {
+        for (content_type, expected_mime) in [
+            ("image/webp", "image/webp"),
+            ("image/gif", "image/gif"),
+            ("application/octet-stream", "image/jpeg"),
+        ] {
+            let server = MockServer::new(vec![(200, "bytes", content_type)]);
+            let settings = WallpaperSettings {
+                proxy: None,
+                download_dir: None,
+                sources: HashMap::new(),
+                base_urls: HashMap::new(),
+            };
+            let data_url =
+                tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings))
+                    .unwrap();
+            assert!(
+                data_url.starts_with(&format!("data:{expected_mime};base64,")),
+                "expected {expected_mime}, got {data_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_thumb_size_rejects_oversized_body() {
+        let big = vec![0u8; MAX_THUMB_BYTES + 1];
+        let err = validate_thumb_size(&big).unwrap_err();
+        assert!(err.contains("too large"));
+        assert!(validate_thumb_size(&[0u8; 10]).is_ok());
     }
 
     #[test]
@@ -957,6 +1192,7 @@ mod tests {
                 source: "wallhaven".to_string(),
                 keywords: String::new(),
                 random: false,
+                ..Default::default()
             },
             settings,
         );
@@ -981,6 +1217,7 @@ mod tests {
                 source: "danbooru".to_string(),
                 keywords: String::new(),
                 random: false,
+                ..Default::default()
             },
             settings,
         ))
@@ -1005,12 +1242,31 @@ mod tests {
                 source: "safebooru".to_string(),
                 keywords: String::new(),
                 random: false,
+                ..Default::default()
             },
             settings,
         ))
         .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source, "safebooru");
+    }
+
+    #[test]
+    fn search_danbooru_includes_page_param_when_gt_one() {
+        let server = MockServer::ok(r#"[]"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "danbooru".to_string(),
+            keywords: String::new(),
+            random: false,
+            page: 3,
+        };
+        let src = SourceSettings::default();
+        tauri::async_runtime::block_on(search_danbooru(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("page=3"), "got: {}", lines[0]);
     }
 
     #[test]
@@ -1024,6 +1280,7 @@ mod tests {
                 source: "wallhaven".to_string(),
                 keywords: String::new(),
                 random: false,
+                ..Default::default()
             },
             settings,
         ))
@@ -1042,6 +1299,7 @@ mod tests {
                 source: "danbooru".to_string(),
                 keywords: String::new(),
                 random: false,
+                ..Default::default()
             },
             settings,
         ))
@@ -1060,6 +1318,7 @@ mod tests {
                 source: "safebooru".to_string(),
                 keywords: String::new(),
                 random: false,
+                ..Default::default()
             },
             settings,
         ))
@@ -1079,6 +1338,7 @@ mod tests {
             source: "danbooru".to_string(),
             keywords: String::new(),
             random: true,
+            ..Default::default()
         };
         let src = SourceSettings {
             login: Some("me".to_string()),
@@ -1104,6 +1364,7 @@ mod tests {
             source: "danbooru".to_string(),
             keywords: String::new(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let err = tauri::async_runtime::block_on(search_danbooru(
@@ -1128,6 +1389,7 @@ mod tests {
             source: "danbooru".to_string(),
             keywords: String::new(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let items = tauri::async_runtime::block_on(search_danbooru(
@@ -1152,6 +1414,7 @@ mod tests {
             source: "safebooru".to_string(),
             keywords: String::new(),
             random: false,
+            ..Default::default()
         };
         let src = SourceSettings::default();
         let items = tauri::async_runtime::block_on(search_safebooru(
@@ -1207,5 +1470,75 @@ mod tests {
         assert_eq!(db.api_key.as_deref(), Some("db-key"));
         assert_eq!(db.rating.as_deref(), Some("sensitive"));
         assert!(settings.source("safebooru").api_key.is_none());
+    }
+
+    #[test]
+    fn source_settings_parse_string_dimensions_from_frontend() {
+        let json = r#"{
+            "proxy": "http://127.0.0.1:7890",
+            "sources": {
+                "wallhaven": {
+                    "apiKey": "2DsBL7QRs1bRE2QkKraRqL0v5w7PWkA2",
+                    "categories": "010",
+                    "purity": "010",
+                    "minWidth": "1920",
+                    "minHeight": "1080",
+                    "rating": "safe"
+                },
+                "safebooru": {
+                    "minWidth": "1920",
+                    "minHeight": ""
+                }
+            }
+        }"#;
+        let settings: WallpaperSettings =
+            serde_json::from_str(json).expect("frontend string format should parse");
+        assert_eq!(settings.proxy.as_deref(), Some("http://127.0.0.1:7890"));
+        let wh = settings.source("wallhaven");
+        assert_eq!(
+            wh.api_key.as_deref(),
+            Some("2DsBL7QRs1bRE2QkKraRqL0v5w7PWkA2")
+        );
+        assert_eq!(wh.purity.as_deref(), Some("010"));
+        assert_eq!(wh.min_width, Some(1920));
+        assert_eq!(wh.min_height, Some(1080));
+        let sf = settings.source("safebooru");
+        assert_eq!(sf.min_width, Some(1920));
+        assert_eq!(sf.min_height, None);
+    }
+
+    #[test]
+    fn de_u32_string_handles_missing_and_invalid_values() {
+        let invalid_str = r#"{
+            "sources": {
+                "wallhaven": {
+                    "minWidth": "not-a-number"
+                }
+            }
+        }"#;
+        let err = serde_json::from_str::<WallpaperSettings>(invalid_str).unwrap_err();
+        assert!(err.to_string().contains("invalid u32 string"));
+
+        let other_type = r#"{
+            "sources": {
+                "wallhaven": {
+                    "minHeight": true
+                }
+            }
+        }"#;
+        let err = serde_json::from_str::<WallpaperSettings>(other_type).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("expected number or numeric string"));
+
+        let json = r#"{
+            "sources": {
+                "wallhaven": {
+                    "minWidth": null
+                }
+            }
+        }"#;
+        let settings: WallpaperSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.source("wallhaven").min_width, None);
     }
 }
