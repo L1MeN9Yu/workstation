@@ -468,9 +468,7 @@ pub async fn fetch_thumb_image(url: String, settings: WallpaperSettings) -> Resu
         .bytes()
         .await
         .map_err(|e| format!("thumb read failed: {e}"))?;
-    if bytes.len() > MAX_THUMB_BYTES {
-        return Err(format!("thumb image too large: {} bytes", bytes.len()));
-    }
+    validate_thumb_size(&bytes)?;
     let mime = if content_type.contains("png") {
         "image/png"
     } else if content_type.contains("webp") {
@@ -483,6 +481,13 @@ pub async fn fetch_thumb_image(url: String, settings: WallpaperSettings) -> Resu
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+fn validate_thumb_size(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_THUMB_BYTES {
+        return Err(format!("thumb image too large: {} bytes", bytes.len()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -933,6 +938,24 @@ mod tests {
     }
 
     #[test]
+    fn search_safebooru_includes_pid_offset_when_page_gt_one() {
+        let server = MockServer::ok(r#"[]"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "safebooru".to_string(),
+            keywords: String::new(),
+            random: false,
+            page: 2,
+        };
+        let src = SourceSettings::default();
+        tauri::async_runtime::block_on(search_safebooru(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("pid=24"), "got: {}", lines[0]);
+    }
+
+    #[test]
     fn fetch_thumb_image_returns_base64_data_url() {
         let server = MockServer::new(vec![(200, "png-bytes", "image/png")]);
         let settings = WallpaperSettings {
@@ -958,6 +981,38 @@ mod tests {
         let err = tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings))
             .unwrap_err();
         assert!(err.contains("thumb"));
+    }
+
+    #[test]
+    fn fetch_thumb_image_maps_mime_types() {
+        for (content_type, expected_mime) in [
+            ("image/webp", "image/webp"),
+            ("image/gif", "image/gif"),
+            ("application/octet-stream", "image/jpeg"),
+        ] {
+            let server = MockServer::new(vec![(200, "bytes", content_type)]);
+            let settings = WallpaperSettings {
+                proxy: None,
+                download_dir: None,
+                sources: HashMap::new(),
+                base_urls: HashMap::new(),
+            };
+            let data_url =
+                tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings))
+                    .unwrap();
+            assert!(
+                data_url.starts_with(&format!("data:{expected_mime};base64,")),
+                "expected {expected_mime}, got {data_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_thumb_size_rejects_oversized_body() {
+        let big = vec![0u8; MAX_THUMB_BYTES + 1];
+        let err = validate_thumb_size(&big).unwrap_err();
+        assert!(err.contains("too large"));
+        assert!(validate_thumb_size(&[0u8; 10]).is_ok());
     }
 
     #[test]
@@ -1187,6 +1242,24 @@ mod tests {
         .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source, "safebooru");
+    }
+
+    #[test]
+    fn search_danbooru_includes_page_param_when_gt_one() {
+        let server = MockServer::ok(r#"[]"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "danbooru".to_string(),
+            keywords: String::new(),
+            random: false,
+            page: 3,
+        };
+        let src = SourceSettings::default();
+        tauri::async_runtime::block_on(search_danbooru(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("page=3"), "got: {}", lines[0]);
     }
 
     #[test]
@@ -1425,5 +1498,40 @@ mod tests {
         let sf = settings.source("safebooru");
         assert_eq!(sf.min_width, Some(1920));
         assert_eq!(sf.min_height, None);
+    }
+
+    #[test]
+    fn de_u32_string_handles_missing_and_invalid_values() {
+        let invalid_str = r#"{
+            "sources": {
+                "wallhaven": {
+                    "minWidth": "not-a-number"
+                }
+            }
+        }"#;
+        let err = serde_json::from_str::<WallpaperSettings>(invalid_str).unwrap_err();
+        assert!(err.to_string().contains("invalid u32 string"));
+
+        let other_type = r#"{
+            "sources": {
+                "wallhaven": {
+                    "minHeight": true
+                }
+            }
+        }"#;
+        let err = serde_json::from_str::<WallpaperSettings>(other_type).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("expected number or numeric string"));
+
+        let json = r#"{
+            "sources": {
+                "wallhaven": {
+                    "minWidth": null
+                }
+            }
+        }"#;
+        let settings: WallpaperSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.source("wallhaven").min_width, None);
     }
 }
