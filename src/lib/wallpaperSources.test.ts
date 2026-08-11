@@ -21,6 +21,14 @@ describe("wallpaperSources", () => {
     expect(safebooru?.supportsRandom).toBe(false);
   });
 
+  it("exposes the official homepage per source", () => {
+    expect(WALLPAPER_SOURCES.map((s) => s.homepage)).toEqual([
+      "https://wallhaven.cc",
+      "https://danbooru.donmai.us",
+      "https://safebooru.org",
+    ]);
+  });
+
   it("getSourceMeta returns undefined for unknown source", () => {
     expect(getSourceMeta("nope")).toBeUndefined();
   });

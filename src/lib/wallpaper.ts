@@ -21,6 +21,7 @@ export interface SearchQuery {
   source: string;
   keywords: string;
   random: boolean;
+  page?: number;
 }
 
 export interface SourceSettings {
@@ -82,6 +83,10 @@ export function searchWallpapers(query: SearchQuery): Promise<WallpaperItem[]> {
 
 export function downloadWallpaper(item: WallpaperItem): Promise<string> {
   return invoke<string>("download_wallpaper", { item });
+}
+
+export function fetchWallpaperThumb(url: string): Promise<string> {
+  return invoke<string>("fetch_remote_image", { url });
 }
 
 function mergeSourceSettings(

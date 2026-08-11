@@ -4,6 +4,7 @@ export interface WallpaperSourceMeta {
   placeholder: string;
   supportsRandom: boolean;
   description: string;
+  homepage: string;
 }
 
 export const WALLPAPER_SOURCES: WallpaperSourceMeta[] = [
@@ -13,6 +14,7 @@ export const WALLPAPER_SOURCES: WallpaperSourceMeta[] = [
     placeholder: "关键词，如 anime、landscape",
     supportsRandom: true,
     description: "官方 API，动漫/游戏壁纸丰富，需代理访问",
+    homepage: "https://wallhaven.cc",
   },
   {
     id: "danbooru",
@@ -20,6 +22,7 @@ export const WALLPAPER_SOURCES: WallpaperSourceMeta[] = [
     placeholder: "标签，如 landscape、scenery",
     supportsRandom: true,
     description: "动漫图库，匿名限流约 1 次/秒",
+    homepage: "https://danbooru.donmai.us",
   },
   {
     id: "safebooru",
@@ -27,6 +30,7 @@ export const WALLPAPER_SOURCES: WallpaperSourceMeta[] = [
     placeholder: "标签，如 landscape",
     supportsRandom: false,
     description: "动漫图库，SFW 过滤，无需代理",
+    homepage: "https://safebooru.org",
   },
 ];
 

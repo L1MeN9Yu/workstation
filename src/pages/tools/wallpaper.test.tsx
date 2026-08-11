@@ -5,6 +5,7 @@ import WallpaperTool from "./wallpaper";
 import {
   applyWallpaperToGhosty,
   downloadWallpaper,
+  fetchWallpaperThumb,
   loadWallpaperSettings,
   saveWallpaperSettings,
   searchWallpapers,
@@ -13,6 +14,7 @@ import {
 vi.mock("../../lib/wallpaper", () => ({
   applyWallpaperToGhosty: vi.fn(),
   downloadWallpaper: vi.fn(),
+  fetchWallpaperThumb: vi.fn(),
   loadWallpaperSettings: vi.fn(),
   saveWallpaperSettings: vi.fn(),
   searchWallpapers: vi.fn(),
@@ -72,6 +74,7 @@ describe("WallpaperTool", () => {
       },
     });
     vi.mocked(searchWallpapers).mockResolvedValue([]);
+    vi.mocked(fetchWallpaperThumb).mockResolvedValue("data:image/jpeg;base64,AAAA");
     container = document.createElement("div");
     document.body.appendChild(container);
     root = setup(container);
@@ -90,6 +93,25 @@ describe("WallpaperTool", () => {
     expect(container.textContent).toContain("Danbooru");
     expect(container.textContent).toContain("Safebooru");
     expect(container.textContent).toContain("搜索壁纸以预览");
+  });
+
+  it("shows only the selected source homepage link and switches on tab change", async () => {
+    await flush();
+    let link = container.querySelector("a[href='https://wallhaven.cc']");
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain("官网");
+    expect(container.querySelector("a[href='https://danbooru.donmai.us']")).toBeNull();
+    expect(container.querySelector("a[href='https://safebooru.org']")).toBeNull();
+
+    const danbooruTab = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Danbooru",
+    )!;
+    act(() => {
+      danbooruTab.click();
+    });
+    link = container.querySelector("a[href='https://danbooru.donmai.us']");
+    expect(link).not.toBeNull();
+    expect(container.querySelector("a[href='https://wallhaven.cc']")).toBeNull();
   });
 
   it("searches with keywords and renders result grid", async () => {
@@ -122,8 +144,50 @@ describe("WallpaperTool", () => {
       source: "wallhaven",
       keywords: "anime",
       random: false,
+      page: 1,
     });
     expect(container.textContent).toContain("1920×1080");
+  });
+
+  it("shows thumb via proxied fetch and renders failure fallback", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-abc",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    await flush();
+    const searchBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "搜索",
+    )!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    const img = container.querySelector("img");
+    expect(img?.getAttribute("src")).toBe("data:image/jpeg;base64,AAAA");
+
+    vi.mocked(fetchWallpaperThumb).mockRejectedValue(new Error("proxy down"));
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-xyz",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/x.jpg",
+        full_url: "https://full.example/x.jpg",
+        width: 2560,
+        height: 1440,
+      },
+    ]);
+    await act(async () => {
+      searchBtn.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("加载失败");
   });
 
   it("random button passes empty keywords with random true", async () => {
@@ -138,6 +202,7 @@ describe("WallpaperTool", () => {
       source: "wallhaven",
       keywords: "",
       random: true,
+      page: 1,
     });
   });
 
@@ -162,6 +227,61 @@ describe("WallpaperTool", () => {
       searchBtn.click();
     });
     expect(container.textContent).toContain("没有找到满足条件的壁纸");
+  });
+
+  it("loads more results appending page 2 items", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValueOnce([
+      {
+        id: "wallhaven-a",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    vi.mocked(searchWallpapers).mockResolvedValueOnce([
+      {
+        id: "wallhaven-b",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/b.jpg",
+        full_url: "https://full.example/b.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    await flush();
+    const searchBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "搜索",
+    )!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    expect(searchWallpapers).toHaveBeenLastCalledWith({
+      source: "wallhaven",
+      keywords: "",
+      random: false,
+      page: 1,
+    });
+    expect(container.textContent).toContain("加载更多");
+
+    const moreBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "加载更多",
+    )!;
+    await act(async () => {
+      moreBtn.click();
+    });
+    expect(searchWallpapers).toHaveBeenLastCalledWith({
+      source: "wallhaven",
+      keywords: "",
+      random: false,
+      page: 2,
+    });
+    const imgs = container.querySelectorAll("img");
+    expect(imgs.length).toBe(2);
+    expect(imgs[0].getAttribute("src")).toBe(
+      "data:image/jpeg;base64,AAAA",
+    );
   });
 
   it("downloads and applies wallpaper on button click", async () => {
