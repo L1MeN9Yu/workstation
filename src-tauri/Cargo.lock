@@ -5140,6 +5140,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "workstation"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "dirs 5.0.1",
  "futures-util",
  "reqwest 0.12.28",

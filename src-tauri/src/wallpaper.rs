@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::Client;
@@ -48,6 +48,8 @@ pub struct WallpaperSettings {
     pub proxy: Option<String>,
     pub download_dir: Option<String>,
     pub sources: HashMap<String, SourceSettings>,
+    #[serde(skip)]
+    pub base_urls: HashMap<String, String>,
 }
 
 impl WallpaperSettings {
@@ -71,24 +73,26 @@ fn http_error(status: reqwest::StatusCode, source: &str) -> String {
     format!("{source} request failed with HTTP {}", status.as_u16())
 }
 
-fn is_known_source(source: &str) -> bool {
-    matches!(source, "wallhaven" | "danbooru" | "safebooru")
-}
-
 pub async fn search_wallpapers(
     query: SearchQuery,
     settings: WallpaperSettings,
 ) -> Result<Vec<WallpaperItem>, String> {
-    if !is_known_source(&query.source) {
-        return Err(format!("unknown wallpaper source: {}", query.source));
-    }
     let client = build_client(settings.proxy.as_deref())?;
     let src = settings.source(&query.source);
+    let base = settings
+        .base_urls
+        .get(&query.source)
+        .map(String::as_str)
+        .unwrap_or(match query.source.as_str() {
+            "wallhaven" => "https://wallhaven.cc",
+            "danbooru" => "https://danbooru.donmai.us",
+            _ => "https://safebooru.org",
+        });
     match query.source.as_str() {
-        "wallhaven" => search_wallhaven(&client, &query, &src).await,
-        "danbooru" => search_danbooru(&client, &query, &src).await,
-        "safebooru" => search_safebooru(&client, &query, &src).await,
-        _ => unreachable!("guarded by is_known_source"),
+        "wallhaven" => search_wallhaven(&client, &query, &src, base).await,
+        "danbooru" => search_danbooru(&client, &query, &src, base).await,
+        "safebooru" => search_safebooru(&client, &query, &src, base).await,
+        other => Err(format!("unknown wallpaper source: {other}")),
     }
 }
 
@@ -115,11 +119,12 @@ async fn search_wallhaven(
     client: &Client,
     query: &SearchQuery,
     src: &SourceSettings,
+    base_url: &str,
 ) -> Result<Vec<WallpaperItem>, String> {
     let min_width = src.min_width.unwrap_or(DEFAULT_MIN_WIDTH);
     let min_height = src.min_height.unwrap_or(DEFAULT_MIN_HEIGHT);
     let mut url =
-        reqwest::Url::parse("https://wallhaven.cc/api/v1/search").map_err(|e| e.to_string())?;
+        reqwest::Url::parse(&format!("{base_url}/api/v1/search")).map_err(|e| e.to_string())?;
     {
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("categories", src.categories.as_deref().unwrap_or("010"));
@@ -177,6 +182,7 @@ async fn search_danbooru(
     client: &Client,
     query: &SearchQuery,
     src: &SourceSettings,
+    base_url: &str,
 ) -> Result<Vec<WallpaperItem>, String> {
     let min_width = src.min_width.unwrap_or(DEFAULT_MIN_WIDTH);
     let rating = src.rating.as_deref().unwrap_or("safe");
@@ -189,7 +195,7 @@ async fn search_danbooru(
         tags.extend(kw.split_whitespace().map(|t| t.to_string()));
     }
     let mut url =
-        reqwest::Url::parse("https://danbooru.donmai.us/posts.json").map_err(|e| e.to_string())?;
+        reqwest::Url::parse(&format!("{base_url}/posts.json")).map_err(|e| e.to_string())?;
     {
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("tags", &tags.join(" "));
@@ -253,10 +259,11 @@ async fn search_safebooru(
     client: &Client,
     query: &SearchQuery,
     src: &SourceSettings,
+    base_url: &str,
 ) -> Result<Vec<WallpaperItem>, String> {
     let min_width = src.min_width.unwrap_or(DEFAULT_MIN_WIDTH);
     let mut url =
-        reqwest::Url::parse("https://safebooru.org/index.php").map_err(|e| e.to_string())?;
+        reqwest::Url::parse(&format!("{base_url}/index.php")).map_err(|e| e.to_string())?;
     {
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("page", "dapi");
@@ -333,6 +340,21 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
+async fn write_download_stream(
+    path: &Path,
+    mut stream: impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin,
+) -> Result<(), String> {
+    let mut file = fs::File::create(path).map_err(|e| format!("cannot create file: {e}"))?;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("download stream error: {e}"))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("cannot write file: {e}"))?;
+    }
+    file.flush()
+        .map_err(|e| format!("cannot flush file: {e}"))?;
+    Ok(())
+}
+
 pub async fn download_wallpaper(
     item: WallpaperItem,
     settings: WallpaperSettings,
@@ -362,27 +384,116 @@ pub async fn download_wallpaper(
     let file_name = sanitize_file_name(&item.id);
     let path = dir.join(format!("{file_name}.{ext}"));
 
-    let mut file = fs::File::create(&path).map_err(|e| format!("cannot create file: {e}"))?;
-    let mut stream = resp.bytes_stream().map_err(std::io::Error::other);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("download stream error: {e}"))?;
-        file.write_all(&chunk)
-            .map_err(|e| format!("cannot write file: {e}"))?;
-    }
-    file.flush()
-        .map_err(|e| format!("cannot flush file: {e}"))?;
+    let stream = resp.bytes_stream().map_err(std::io::Error::other);
+    write_download_stream(&path, stream).await?;
     Ok(path.display().to_string())
 }
 
-pub fn default_download_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|d| d.join(".config").join("cmux").join("wallpapers"))
+fn default_download_dir_from(home: Option<PathBuf>) -> PathBuf {
+    home.map(|d| d.join(".config").join("cmux").join("wallpapers"))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn default_download_dir() -> PathBuf {
+    default_download_dir_from(dirs::home_dir())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    struct MockServer {
+        addr: String,
+        responses: Arc<Vec<(u16, &'static str, &'static str)>>,
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl MockServer {
+        fn new(responses: Vec<(u16, &'static str, &'static str)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let responses = Arc::new(responses);
+            let counter = Arc::new(AtomicUsize::new(0));
+            let (r2, c2) = (responses.clone(), counter.clone());
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let idx = c2.fetch_add(1, Ordering::SeqCst);
+                    let (status, body, content_type) =
+                        r2.get(idx)
+                            .copied()
+                            .unwrap_or((200, "[]", "application/json"));
+                    let _ = serve(&mut stream, status, body, content_type);
+                }
+            });
+            Self {
+                addr,
+                responses,
+                counter,
+            }
+        }
+
+        fn ok(body: &'static str) -> Self {
+            Self::new(vec![(200, body, "application/json")])
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        fn hit_count(&self) -> usize {
+            self.counter.load(Ordering::SeqCst)
+        }
+    }
+
+    fn serve(
+        stream: &mut TcpStream,
+        status: u16,
+        body: &str,
+        content_type: &str,
+    ) -> std::io::Result<()> {
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut request_line = String::new();
+        let _ = reader.read_line(&mut request_line);
+        for line in reader.by_ref().lines() {
+            let line = line?;
+            if line.is_empty() {
+                break;
+            }
+        }
+        let reason = if status == 200 { "OK" } else { "ERROR" };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes())?;
+        stream.flush()
+    }
+
+    fn read_body(path: &Path) -> String {
+        let mut f = std::fs::File::open(path).unwrap();
+        let mut s = String::new();
+        f.read_to_string(&mut s).unwrap();
+        s
+    }
+
+    fn settings_with_sources(proxy: Option<&str>, sources: &[(&str, &str)]) -> WallpaperSettings {
+        let map: HashMap<String, SourceSettings> = sources
+            .iter()
+            .map(|(id, json)| ((*id).to_string(), serde_json::from_str(json).unwrap()))
+            .collect();
+        WallpaperSettings {
+            proxy: proxy.map(|p| p.to_string()),
+            download_dir: None,
+            sources: map,
+            base_urls: HashMap::new(),
+        }
+    }
 
     #[test]
     fn extension_from_content_type_maps_common_types() {
@@ -412,6 +523,56 @@ mod tests {
     }
 
     #[test]
+    fn default_download_dir_from_none_home_falls_back_to_current_dir() {
+        assert_eq!(default_download_dir_from(None), PathBuf::from("."));
+    }
+
+    #[test]
+    fn write_download_stream_writes_chunks() {
+        let dir =
+            std::env::temp_dir().join(format!("workstation-wall-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.jpg");
+        let stream = futures_util::stream::iter(vec![
+            Ok(bytes::Bytes::from_static(b"ab")),
+            Ok(bytes::Bytes::from_static(b"cd")),
+        ]);
+        tauri::async_runtime::block_on(write_download_stream(&path, stream)).unwrap();
+        assert_eq!(read_body(&path), "abcd");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_download_stream_propagates_stream_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "workstation-wall-stream-err-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.jpg");
+        let stream = futures_util::stream::iter(vec![Err(std::io::Error::other("boom"))]);
+        let err = tauri::async_runtime::block_on(write_download_stream(&path, stream)).unwrap_err();
+        assert!(err.contains("stream error"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_download_stream_propagates_create_error() {
+        let blocker = std::env::temp_dir().join(format!(
+            "workstation-wall-stream-blocker-{}",
+            std::process::id()
+        ));
+        std::fs::write(&blocker, "i am a file").unwrap();
+        let path = blocker.join("nested").join("out.jpg");
+        let stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(b"a"))]);
+        let err = tauri::async_runtime::block_on(write_download_stream(&path, stream)).unwrap_err();
+        assert!(err.contains("cannot create file"));
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[test]
     fn build_client_accepts_proxy_and_none() {
         assert!(build_client(Some("http://127.0.0.1:7890")).is_ok());
         assert!(build_client(None).is_ok());
@@ -434,12 +595,542 @@ mod tests {
     }
 
     #[test]
-    fn known_sources_are_allowed() {
-        assert!(is_known_source("wallhaven"));
-        assert!(is_known_source("danbooru"));
-        assert!(is_known_source("safebooru"));
-        assert!(!is_known_source("unsplash"));
-        assert!(!is_known_source(""));
+    fn search_wallhaven_parses_and_filters() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"{"data":[{"id":"a1","path":"https://img/full1.jpg","thumbs":{"small":"https://t/1.jpg"},"dimension_x":2560,"dimension_y":1440},{"id":"a2","path":"https://img/full2.jpg","thumbs":{"small":"https://t/2.jpg"},"dimension_x":1280,"dimension_y":720}]}"#,
+            "application/json",
+        )]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: "anime".to_string(),
+            random: false,
+        };
+        let src = SourceSettings {
+            api_key: Some("k1".to_string()),
+            purity: Some("110".to_string()),
+            categories: Some("111".to_string()),
+            min_width: Some(1920),
+            min_height: Some(1080),
+            rating: None,
+            login: None,
+        };
+        let items = tauri::async_runtime::block_on(search_wallhaven(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "wallhaven-a1");
+        assert_eq!(items[0].source, "wallhaven");
+        assert_eq!(items[0].thumb_url, "https://t/1.jpg");
+        assert_eq!(items[0].width, 2560);
+        assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn search_wallhaven_random_adds_sorting() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: true,
+        };
+        let src = SourceSettings::default();
+        let items = tauri::async_runtime::block_on(search_wallhaven(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert!(items.is_empty());
+        assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn search_wallhaven_http_error_is_propagated() {
+        let server = MockServer::new(vec![(403, r#"{"error":"denied"}"#, "text/plain")]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let err = tauri::async_runtime::block_on(search_wallhaven(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap_err();
+        assert!(err.contains("wallhaven"));
+    }
+
+    #[test]
+    fn search_wallhaven_invalid_json_is_error() {
+        let server = MockServer::new(vec![(200, "not json", "application/json")]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let err = tauri::async_runtime::block_on(search_wallhaven(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap_err();
+        assert!(err.contains("parse failed"));
+    }
+
+    #[test]
+    fn search_danbooru_filters_placeholders_and_skips_narrow() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":1,"file_url":"https://cdn/db1.jpg","preview_file_url":"https://cdn/p1.jpg","image_width":2560,"image_height":1440},{"id":2,"file_url":"https://loremflickr.com/1.jpg","preview_file_url":"https://cdn/p2.jpg","image_width":3000,"image_height":2000},{"id":3,"file_url":null,"preview_file_url":"https://cdn/p3.jpg","image_width":1920,"image_height":1080},{"id":4,"file_url":"https://cdn/db4.jpg","preview_file_url":"https://cdn/p4.jpg","image_width":1280,"image_height":720}]"#,
+            "application/json",
+        )]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "danbooru".to_string(),
+            keywords: "landscape".to_string(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let items = tauri::async_runtime::block_on(search_danbooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "danbooru-1");
+        assert_eq!(items[0].thumb_url, "https://cdn/p1.jpg");
+    }
+
+    #[test]
+    fn search_danbooru_uses_rating_and_http_error() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":9,"file_url":"https://cdn/db9.jpg","preview_file_url":"https://cdn/p9.jpg","image_width":1920,"image_height":1080}]"#,
+            "application/json",
+        )]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "danbooru".to_string(),
+            keywords: String::new(),
+            random: false,
+        };
+        let src = SourceSettings {
+            rating: Some("sensitive".to_string()),
+            ..SourceSettings::default()
+        };
+        let items = tauri::async_runtime::block_on(search_danbooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source, "danbooru");
+    }
+
+    #[test]
+    fn search_safebooru_uses_sample_url_when_file_missing() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":7,"sample_url":"https://safebooru.org/samples/s7.jpg","width":2560,"height":1440},{"id":8,"sample_url":"https://safebooru.org/samples/s8.jpg","width":1280,"height":720}]"#,
+            "application/json",
+        )]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "safebooru".to_string(),
+            keywords: "scenery".to_string(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let items = tauri::async_runtime::block_on(search_safebooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "safebooru-7");
+        assert_eq!(items[0].full_url, "https://safebooru.org/samples/s7.jpg");
+    }
+
+    #[test]
+    fn search_safebooru_http_error_is_propagated() {
+        let server = MockServer::new(vec![(403, "nope", "text/plain")]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "safebooru".to_string(),
+            keywords: String::new(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let err = tauri::async_runtime::block_on(search_safebooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap_err();
+        assert!(err.contains("safebooru"));
+    }
+
+    #[test]
+    fn download_wallpaper_writes_file_and_returns_path() {
+        let server = MockServer::new(vec![(200, "fake-image-bytes", "image/jpeg")]);
+        let dir = std::env::temp_dir().join(format!("workstation-wall-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let item = WallpaperItem {
+            id: "wallhaven-test123".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            full_url: format!("{}/img", server.base_url()),
+            width: 1920,
+            height: 1080,
+        };
+        let settings = WallpaperSettings {
+            proxy: None,
+            download_dir: Some(dir.display().to_string()),
+            sources: HashMap::new(),
+            base_urls: HashMap::new(),
+        };
+        let path = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap();
+        assert!(path.ends_with("wallhaven-test123.jpg"));
+        assert_eq!(read_body(Path::new(&path)), "fake-image-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_wallpaper_derives_extension_from_content_type() {
+        let server = MockServer::new(vec![(200, "png-bytes", "image/png")]);
+        let dir =
+            std::env::temp_dir().join(format!("workstation-wall-dl-png-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let item = WallpaperItem {
+            id: "danbooru-42".to_string(),
+            source: "danbooru".to_string(),
+            thumb_url: String::new(),
+            full_url: format!("{}/img", server.base_url()),
+            width: 1920,
+            height: 1080,
+        };
+        let settings = WallpaperSettings {
+            proxy: None,
+            download_dir: Some(dir.display().to_string()),
+            sources: HashMap::new(),
+            base_urls: HashMap::new(),
+        };
+        let path = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap();
+        assert!(path.ends_with("danbooru-42.png"));
+        assert_eq!(read_body(Path::new(&path)), "png-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_wallpaper_http_error_is_propagated() {
+        let server = MockServer::new(vec![(500, "boom", "text/plain")]);
+        let item = WallpaperItem {
+            id: "x-1".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            full_url: format!("{}/img", server.base_url()),
+            width: 1920,
+            height: 1080,
+        };
+        let settings = WallpaperSettings::default();
+        let err = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap_err();
+        assert!(err.contains("download"));
+    }
+
+    #[test]
+    fn download_wallpaper_network_error_is_propagated() {
+        let item = WallpaperItem {
+            id: "x-2".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            full_url: "http://127.0.0.1:1/unreachable".to_string(),
+            width: 1920,
+            height: 1080,
+        };
+        let settings = WallpaperSettings::default();
+        let err = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap_err();
+        assert!(err.contains("request failed"));
+    }
+
+    #[test]
+    fn download_wallpaper_bad_proxy_is_propagated() {
+        let item = WallpaperItem {
+            id: "x-3".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            full_url: "https://example.com/img.jpg".to_string(),
+            width: 1920,
+            height: 1080,
+        };
+        let settings = WallpaperSettings {
+            proxy: Some("not a proxy url".to_string()),
+            ..WallpaperSettings::default()
+        };
+        let err = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap_err();
+        assert!(err.contains("invalid proxy"));
+    }
+
+    #[test]
+    fn download_wallpaper_create_dir_error_is_propagated() {
+        let blocker = std::env::temp_dir().join(format!(
+            "workstation-wall-dl-dir-blocker-{}",
+            std::process::id()
+        ));
+        std::fs::write(&blocker, "i am a file").unwrap();
+        let server = MockServer::ok("bytes");
+        let item = WallpaperItem {
+            id: "x-4".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            full_url: format!("{}/img", server.base_url()),
+            width: 1920,
+            height: 1080,
+        };
+        let settings = WallpaperSettings {
+            download_dir: Some(blocker.join("nested").display().to_string()),
+            ..WallpaperSettings::default()
+        };
+        let err = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap_err();
+        assert!(err.contains("cannot create download dir"));
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[test]
+    fn download_wallpaper_no_content_type_defaults_jpg() {
+        let server = MockServer::new(vec![(200, "bytes", "")]);
+        let dir =
+            std::env::temp_dir().join(format!("workstation-wall-dl-noct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let item = WallpaperItem {
+            id: "safebooru-99".to_string(),
+            source: "safebooru".to_string(),
+            thumb_url: String::new(),
+            full_url: format!("{}/img", server.base_url()),
+            width: 1920,
+            height: 1080,
+        };
+        let settings = WallpaperSettings {
+            download_dir: Some(dir.display().to_string()),
+            ..WallpaperSettings::default()
+        };
+        let path = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap();
+        assert!(path.ends_with("safebooru-99.jpg"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_wallpapers_uses_per_source_settings() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"{"data":[{"id":"zz","path":"https://img/z.jpg","thumbs":{"small":"https://t/z.jpg"},"dimension_x":3840,"dimension_y":2160}]}"#,
+            "application/json",
+        )]);
+        let mut settings = settings_with_sources(
+            None,
+            &[(
+                "wallhaven",
+                r#"{"apiKey":"secret","purity":"111","categories":"111"}"#,
+            )],
+        );
+        settings
+            .base_urls
+            .insert("wallhaven".to_string(), server.base_url());
+        let result = search_wallpapers(
+            SearchQuery {
+                source: "wallhaven".to_string(),
+                keywords: String::new(),
+                random: false,
+            },
+            settings,
+        );
+        let items = tauri::async_runtime::block_on(result).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn search_wallpapers_dispatch_danbooru() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":1,"file_url":"https://cdn/db1.jpg","preview_file_url":"https://cdn/p1.jpg","image_width":1920,"image_height":1080}]"#,
+            "application/json",
+        )]);
+        let mut settings = WallpaperSettings::default();
+        settings
+            .base_urls
+            .insert("danbooru".to_string(), server.base_url());
+        let items = tauri::async_runtime::block_on(search_wallpapers(
+            SearchQuery {
+                source: "danbooru".to_string(),
+                keywords: String::new(),
+                random: false,
+            },
+            settings,
+        ))
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source, "danbooru");
+    }
+
+    #[test]
+    fn search_wallpapers_dispatch_safebooru() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":7,"sample_url":"https://safebooru.org/samples/s7.jpg","width":1920,"height":1080}]"#,
+            "application/json",
+        )]);
+        let mut settings = WallpaperSettings::default();
+        settings
+            .base_urls
+            .insert("safebooru".to_string(), server.base_url());
+        let items = tauri::async_runtime::block_on(search_wallpapers(
+            SearchQuery {
+                source: "safebooru".to_string(),
+                keywords: String::new(),
+                random: false,
+            },
+            settings,
+        ))
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source, "safebooru");
+    }
+
+    #[test]
+    fn search_wallpapers_unknown_base_falls_back() {
+        let mut settings = WallpaperSettings::default();
+        settings
+            .base_urls
+            .insert("danbooru".to_string(), "http://127.0.0.1:1".to_string());
+        let err = tauri::async_runtime::block_on(search_wallpapers(
+            SearchQuery {
+                source: "wallhaven".to_string(),
+                keywords: String::new(),
+                random: false,
+            },
+            settings,
+        ))
+        .unwrap_err();
+        assert!(err.contains("request failed"));
+    }
+
+    #[test]
+    fn search_danbooru_random_and_basic_auth() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":5,"file_url":"https://cdn/db5.jpg","preview_file_url":"https://cdn/p5.jpg","image_width":1920,"image_height":1080}]"#,
+            "application/json",
+        )]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "danbooru".to_string(),
+            keywords: String::new(),
+            random: true,
+        };
+        let src = SourceSettings {
+            login: Some("me".to_string()),
+            api_key: Some("key".to_string()),
+            ..SourceSettings::default()
+        };
+        let items = tauri::async_runtime::block_on(search_danbooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn search_danbooru_http_error_is_propagated() {
+        let server = MockServer::new(vec![(403, "denied", "text/plain")]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "danbooru".to_string(),
+            keywords: String::new(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let err = tauri::async_runtime::block_on(search_danbooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap_err();
+        assert!(err.contains("danbooru"));
+    }
+
+    #[test]
+    fn search_danbooru_skips_missing_urls() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":3,"file_url":null,"preview_file_url":null,"image_width":1920,"image_height":1080},{"id":4,"file_url":"https://cdn/db4.jpg","preview_file_url":null,"image_width":1920,"image_height":1080}]"#,
+            "application/json",
+        )]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "danbooru".to_string(),
+            keywords: String::new(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let items = tauri::async_runtime::block_on(search_danbooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn search_safebooru_skips_missing_urls() {
+        let server = MockServer::new(vec![(
+            200,
+            r#"[{"id":8,"width":1920,"height":1080}]"#,
+            "application/json",
+        )]);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "safebooru".to_string(),
+            keywords: String::new(),
+            random: false,
+        };
+        let src = SourceSettings::default();
+        let items = tauri::async_runtime::block_on(search_safebooru(
+            &client,
+            &query,
+            &src,
+            &server.base_url(),
+        ))
+        .unwrap();
+        assert!(items.is_empty());
     }
 
     #[test]
