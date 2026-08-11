@@ -409,7 +409,6 @@ mod tests {
 
     struct MockServer {
         addr: String,
-        responses: Arc<Vec<(u16, &'static str, &'static str)>>,
         counter: Arc<AtomicUsize>,
     }
 
@@ -431,11 +430,7 @@ mod tests {
                     let _ = serve(&mut stream, status, body, content_type);
                 }
             });
-            Self {
-                addr,
-                responses,
-                counter,
-            }
+            Self { addr, counter }
         }
 
         fn ok(body: &'static str) -> Self {
