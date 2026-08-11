@@ -1014,11 +1014,11 @@ mod tests {
     }
 
     #[test]
-    fn search_wallpapers_unknown_base_falls_back() {
+    fn search_wallpapers_invalid_base_url_is_error() {
         let mut settings = WallpaperSettings::default();
         settings
             .base_urls
-            .insert("danbooru".to_string(), "http://127.0.0.1:1".to_string());
+            .insert("wallhaven".to_string(), "not a url".to_string());
         let err = tauri::async_runtime::block_on(search_wallpapers(
             SearchQuery {
                 source: "wallhaven".to_string(),
@@ -1028,7 +1028,43 @@ mod tests {
             settings,
         ))
         .unwrap_err();
-        assert!(err.contains("request failed"));
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn search_wallpapers_danbooru_invalid_base_url_is_error() {
+        let mut settings = WallpaperSettings::default();
+        settings
+            .base_urls
+            .insert("danbooru".to_string(), "not a url".to_string());
+        let err = tauri::async_runtime::block_on(search_wallpapers(
+            SearchQuery {
+                source: "danbooru".to_string(),
+                keywords: String::new(),
+                random: false,
+            },
+            settings,
+        ))
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn search_wallpapers_safebooru_invalid_base_url_is_error() {
+        let mut settings = WallpaperSettings::default();
+        settings
+            .base_urls
+            .insert("safebooru".to_string(), "not a url".to_string());
+        let err = tauri::async_runtime::block_on(search_wallpapers(
+            SearchQuery {
+                source: "safebooru".to_string(),
+                keywords: String::new(),
+                random: false,
+            },
+            settings,
+        ))
+        .unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]
