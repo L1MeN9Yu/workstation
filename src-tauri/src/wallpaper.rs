@@ -546,7 +546,14 @@ mod tests {
         }
 
         fn request_lines(&self) -> Vec<String> {
-            self.requests.lock().unwrap().clone()
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let lines = self.requests.lock().unwrap().clone();
+                if lines.len() >= self.hit_count() || std::time::Instant::now() > deadline {
+                    return lines;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
         }
     }
 
