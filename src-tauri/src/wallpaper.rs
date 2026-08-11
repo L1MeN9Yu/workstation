@@ -363,9 +363,7 @@ pub async fn download_wallpaper(
     let path = dir.join(format!("{file_name}.{ext}"));
 
     let mut file = fs::File::create(&path).map_err(|e| format!("cannot create file: {e}"))?;
-    let mut stream = resp
-        .bytes_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let mut stream = resp.bytes_stream().map_err(std::io::Error::other);
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("download stream error: {e}"))?;
         file.write_all(&chunk)
