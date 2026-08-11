@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub mod runtime;
+pub mod wallpaper;
 
 fn config_dir() -> PathBuf {
     dirs::config_dir()

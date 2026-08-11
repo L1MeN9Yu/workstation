@@ -2,8 +2,10 @@ use tauri::AppHandle;
 
 use crate::{
     cmux_config_path, ghosty_config_path, read_cmux_config_at, read_config as read_config_impl,
-    read_ghosty_config_at, reload_cmux_config_impl, write_cmux_config_at,
-    write_config as write_config_impl, write_ghosty_config_at, CmuxConfigFile, CmuxReloadStatus,
+    read_ghosty_config_at, reload_cmux_config_impl,
+    wallpaper::{self, SearchQuery, WallpaperItem, WallpaperSettings},
+    write_cmux_config_at, write_config as write_config_impl, write_ghosty_config_at,
+    CmuxConfigFile, CmuxReloadStatus,
 };
 
 #[tauri::command]
@@ -50,6 +52,23 @@ pub fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
     reload_cmux_config_impl()
 }
 
+fn wallpaper_settings_from_config() -> WallpaperSettings {
+    read_config_impl("wallpaper".to_string())
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn search_wallpapers(query: SearchQuery) -> Result<Vec<WallpaperItem>, String> {
+    wallpaper::search_wallpapers(query, wallpaper_settings_from_config()).await
+}
+
+#[tauri::command]
+pub async fn download_wallpaper(item: WallpaperItem) -> Result<String, String> {
+    wallpaper::download_wallpaper(item, wallpaper_settings_from_config()).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -62,7 +81,9 @@ pub fn run() {
             read_ghosty_config,
             write_cmux_config,
             write_ghosty_config,
-            reload_cmux_config
+            reload_cmux_config,
+            search_wallpapers,
+            download_wallpaper
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
