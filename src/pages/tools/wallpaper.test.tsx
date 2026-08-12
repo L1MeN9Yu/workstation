@@ -6,7 +6,8 @@ import {
   applyWallpaperToGhosty,
   downloadWallpaper,
   loadWallpaperSettings,
-  saveWallpaperSettings,
+  saveWallpaperProxy,
+  saveWallpaperSources,
   searchWallpapers,
 } from "../../lib/wallpaper";
 
@@ -22,10 +23,30 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("../../lib/wallpaper", () => ({
+  BIT_GROUPS: {
+    categories: [
+      { key: "General", label: "综合" },
+      { key: "Anime", label: "动漫" },
+      { key: "People", label: "人物" },
+    ],
+    purity: [
+      { key: "SFW", label: "SFW" },
+      { key: "Sketchy", label: "Sketchy" },
+      { key: "NSFW", label: "NSFW" },
+    ],
+  },
+  bitsToSelections: (value: string, groups: { key: string }[]) =>
+    groups
+      .map((g, i) => (value[i] === "1" ? g.key : ""))
+      .filter((k) => k !== ""),
+  selectionsToBits: (selected: string[], groups: { key: string }[]) =>
+    groups.map((g) => (selected.includes(g.key) ? "1" : "0")).join(""),
+  generateSeed: vi.fn(() => "mockedseed1234"),
   applyWallpaperToGhosty: vi.fn(),
   downloadWallpaper: vi.fn(),
   loadWallpaperSettings: vi.fn(),
-  saveWallpaperSettings: vi.fn(),
+  saveWallpaperProxy: vi.fn().mockResolvedValue(undefined),
+  saveWallpaperSources: vi.fn().mockResolvedValue(undefined),
   searchWallpapers: vi.fn(),
   thumbUrl: (hash: string) => `thumb://${hash}`,
 }));
@@ -62,6 +83,7 @@ describe("WallpaperTool", () => {
           minWidth: "1920",
           minHeight: "1080",
           rating: "safe",
+          seed: "",
         },
         danbooru: {
           apiKey: "",
@@ -71,6 +93,7 @@ describe("WallpaperTool", () => {
           minWidth: "1920",
           minHeight: "1080",
           rating: "safe",
+          seed: "",
         },
         safebooru: {
           apiKey: "",
@@ -80,6 +103,7 @@ describe("WallpaperTool", () => {
           minWidth: "1920",
           minHeight: "",
           rating: "",
+          seed: "",
         },
       },
     });
@@ -152,12 +176,19 @@ describe("WallpaperTool", () => {
     await act(async () => {
       searchBtn.click();
     });
-    expect(searchWallpapers).toHaveBeenCalledWith({
-      source: "wallhaven",
-      keywords: "anime",
-      random: false,
-      page: 1,
-    });
+    expect(searchWallpapers).toHaveBeenCalledWith(
+      {
+        source: "wallhaven",
+        keywords: "anime",
+        random: false,
+        page: 1,
+      },
+      expect.objectContaining({
+        sources: expect.objectContaining({
+          wallhaven: expect.objectContaining({ purity: "100" }),
+        }),
+      }),
+    );
     expect(container.textContent).toContain("1920×1080");
   });
 
@@ -306,12 +337,15 @@ describe("WallpaperTool", () => {
     await act(async () => {
       randomBtn.click();
     });
-    expect(searchWallpapers).toHaveBeenCalledWith({
-      source: "wallhaven",
-      keywords: "",
-      random: true,
-      page: 1,
-    });
+    expect(searchWallpapers).toHaveBeenCalledWith(
+      {
+        source: "wallhaven",
+        keywords: "",
+        random: true,
+        page: 1,
+      },
+      expect.anything(),
+    );
   });
 
   it("shows source error when search fails", async () => {
@@ -367,12 +401,15 @@ describe("WallpaperTool", () => {
     await act(async () => {
       searchBtn.click();
     });
-    expect(searchWallpapers).toHaveBeenLastCalledWith({
-      source: "wallhaven",
-      keywords: "",
-      random: false,
-      page: 1,
-    });
+    expect(searchWallpapers).toHaveBeenLastCalledWith(
+      {
+        source: "wallhaven",
+        keywords: "",
+        random: false,
+        page: 1,
+      },
+      expect.anything(),
+    );
     expect(container.textContent).toContain("加载更多");
 
     const moreBtn = Array.from(container.querySelectorAll("button")).find(
@@ -381,12 +418,15 @@ describe("WallpaperTool", () => {
     await act(async () => {
       moreBtn.click();
     });
-    expect(searchWallpapers).toHaveBeenLastCalledWith({
-      source: "wallhaven",
-      keywords: "",
-      random: false,
-      page: 2,
-    });
+    expect(searchWallpapers).toHaveBeenLastCalledWith(
+      {
+        source: "wallhaven",
+        keywords: "",
+        random: false,
+        page: 2,
+      },
+      expect.anything(),
+    );
     const imgs = container.querySelectorAll("img");
     expect(imgs.length).toBe(2);
     expect(imgs[0].getAttribute("src")).toContain("thumb://bbbbbbbbbbbbbbbb");
@@ -474,39 +514,12 @@ describe("WallpaperTool", () => {
     await act(async () => {
       saveBtn.click();
     });
-    expect(saveWallpaperSettings).toHaveBeenCalledWith({
-      proxy: "http://127.0.0.1:7890",
-      downloadDir: "",
-      sources: {
-        wallhaven: {
-          apiKey: "",
-          login: "",
-          categories: "010",
-          purity: "100",
-          minWidth: "1920",
-          minHeight: "1080",
-          rating: "safe",
-        },
-        danbooru: {
-          apiKey: "",
-          login: "",
-          categories: "010",
-          purity: "100",
-          minWidth: "1920",
-          minHeight: "1080",
-          rating: "safe",
-        },
-        safebooru: {
-          apiKey: "",
-          login: "",
-          categories: "",
-          purity: "",
-          minWidth: "1920",
-          minHeight: "",
-          rating: "",
-        },
-      },
-    });
+    expect(saveWallpaperProxy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy: "http://127.0.0.1:7890",
+        downloadDir: "",
+      }),
+    );
     expect(container.textContent).toContain("设置已保存");
   });
 
@@ -534,37 +547,194 @@ describe("WallpaperTool", () => {
     expect(container.textContent).not.toContain("最小高度");
   });
 
-  it("edits exposed source settings and saves them via panel", async () => {
-    await flush();
-    const inputs = Array.from(container.querySelectorAll("input"));
-    const apiKeyInput = inputs.find((i) =>
-      i.placeholder.includes("wallhaven 设置页"),
-    )!;
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )!.set!;
-      setter.call(apiKeyInput, "wh-secret");
-      apiKeyInput.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    const buttons = Array.from(container.querySelectorAll("button"));
-    const settingsBtn = buttons.find((b) => b.textContent === "设置")!;
-    await act(async () => {
-      settingsBtn.click();
-    });
-    const saveBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "保存设置",
-    )!;
-    await act(async () => {
-      saveBtn.click();
-    });
-    expect(saveWallpaperSettings).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sources: expect.objectContaining({
+  it("edits source params and auto-saves them debounced", async () => {
+    vi.useFakeTimers();
+    try {
+      await flush();
+      const inputs = Array.from(container.querySelectorAll("input"));
+      const apiKeyInput = inputs.find((i) =>
+        i.placeholder.includes("wallhaven 设置页"),
+      )!;
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )!.set!;
+        setter.call(apiKeyInput, "wh-secret");
+        apiKeyInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(saveWallpaperSources).toHaveBeenCalledWith(
+        expect.objectContaining({
           wallhaven: expect.objectContaining({ apiKey: "wh-secret" }),
         }),
+      );
+      expect(container.textContent).toContain("参数已自动保存");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("renders categories as checkboxes reflecting the stored bit string", async () => {
+    await flush();
+    const checkboxes = Array.from(
+      container.querySelectorAll('input[type="checkbox"]'),
+    );
+    const labels = Array.from(container.querySelectorAll("label"));
+    const animeLabel = labels.find((l) =>
+      l.textContent?.includes("动漫"),
+    )!;
+    const generalLabel = labels.find((l) =>
+      l.textContent?.includes("综合"),
+    )!;
+    expect(checkboxes).toHaveLength(6);
+    expect(animeLabel.querySelector("input")!.checked).toBe(true);
+    expect(generalLabel.querySelector("input")!.checked).toBe(false);
+  });
+
+  it("encodes checkbox selections back to the bit string on save", async () => {
+    vi.useFakeTimers();
+    try {
+      await flush();
+      const labels = Array.from(container.querySelectorAll("label"));
+      const generalLabel = labels.find((l) =>
+        l.textContent?.includes("综合"),
+      )!;
+      await act(async () => {
+        generalLabel.querySelector("input")!.click();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(saveWallpaperSources).toHaveBeenCalledWith(
+        expect.objectContaining({
+          wallhaven: expect.objectContaining({ categories: "110" }),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects unchecking the last category option with an inline hint", async () => {
+    vi.mocked(loadWallpaperSettings).mockResolvedValue({
+      proxy: "",
+      downloadDir: "",
+      sources: {
+        wallhaven: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "000",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+        },
+        danbooru: {
+          apiKey: "",
+          login: "",
+          categories: "000",
+          purity: "000",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+        },
+        safebooru: {
+          apiKey: "",
+          login: "",
+          categories: "000",
+          purity: "000",
+          minWidth: "1920",
+          minHeight: "",
+          rating: "",
+          seed: "",
+        },
+      },
+    });
+    await flush();
+    const labels = Array.from(container.querySelectorAll("label"));
+    const animeLabel = labels.find((l) =>
+      l.textContent?.includes("动漫"),
+    )!;
+    await act(async () => {
+      animeLabel.querySelector("input")!.click();
+    });
+    expect(container.textContent).toContain("至少需勾选一项");
+    const inputs = Array.from(
+      container.querySelectorAll('input[type="checkbox"]'),
+    );
+    expect(
+      labels.find((l) => l.textContent?.includes("动漫"))!.querySelector(
+        "input",
+      )!.checked,
+    ).toBe(true);
+    expect(inputs[1]).not.toBe(null);
+  });
+
+  it("renders rating as a select with an unlimited option", async () => {
+    await flush();
+    const danbooruTab = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Danbooru",
+    )!;
+    await act(async () => {
+      danbooruTab.click();
+    });
+    const select = container.querySelector("select")!;
+    expect(select).not.toBe(null);
+    const options = Array.from(select.querySelectorAll("option")).map(
+      (o) => o.value,
+    );
+    expect(options).toEqual(["safe", "questionable", "explicit", ""]);
+    expect(container.textContent).toContain("不限");
+  });
+
+  it("filters negative values in number inputs", async () => {
+    await flush();
+    const numberInputs = Array.from(
+      container.querySelectorAll('input[type="number"]'),
+    );
+    expect(numberInputs.length).toBeGreaterThan(0);
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(numberInputs[0], "-5");
+      numberInputs[0].dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect((numberInputs[0] as HTMLInputElement).value).toBe("1920");
+  });
+
+  it("renders a seed input with refresh button for wallhaven", async () => {
+    await flush();
+    const seedInput = Array.from(container.querySelectorAll("input")).find(
+      (i) => i.placeholder.includes("随机搜索种子"),
+    )!;
+    expect(seedInput).not.toBe(undefined);
+    const refreshBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "刷新")!;
+    expect(refreshBtn).not.toBe(undefined);
+    expect(container.textContent).toContain("随机搜索的种子");
+  });
+
+  it("refresh button generates a new seed and saves it automatically", async () => {
+    await flush();
+    const refreshBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "刷新")!;
+    await act(async () => {
+      refreshBtn.click();
+    });
+    expect(saveWallpaperSources).toHaveBeenCalledWith(
+      expect.objectContaining({
+        wallhaven: expect.objectContaining({ seed: "mockedseed1234" }),
       }),
     );
+    expect(container.textContent).toContain("seed 已刷新并保存");
   });
 });
