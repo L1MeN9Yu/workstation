@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::{
     cmux_config_path, ghosty_config_path, read_cmux_config_at, read_config as read_config_impl,
@@ -131,12 +131,22 @@ pub async fn download_wallpaper(item: WallpaperItem) -> Result<String, String> {
     wallpaper::download_wallpaper(item, wallpaper_settings_from_config()).await
 }
 
+#[tauri::command]
+pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
+    let dir = crate::logging::log_dir(&app)?;
+    tauri_plugin_opener::open_path(dir, None::<&str>)
+        .map_err(|e| format!("cannot open log dir: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let _ = crate::logging::init_logging(app);
+            app.listen("frontend-log", move |event| {
+                crate::logging::log_frontend_event(event.payload());
+            });
             let cache_dir = app
                 .path()
                 .app_cache_dir()
@@ -195,7 +205,8 @@ pub fn run() {
             write_ghosty_config,
             reload_cmux_config,
             search_wallpapers,
-            download_wallpaper
+            download_wallpaper,
+            open_log_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
