@@ -1422,7 +1422,8 @@ mod tests {
         std::fs::write(dir.join("noext"), "x").unwrap();
         std::fs::write(dir.join(".jpg"), "x").unwrap();
         std::fs::write(dir.join("hash1234567890.verylong"), "x").unwrap();
-        std::fs::create_dir(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join(CACHE_META_FILE), "{}").unwrap();
+        std::fs::create_dir(dir.join("dir.png")).unwrap();
         std::fs::write(cache_file_path(&dir, "cafe0000000000001", "png"), "abc").unwrap();
         let index = rebuild_thumb_index(&dir);
         assert_eq!(index.len(), 1);
@@ -1445,6 +1446,24 @@ mod tests {
         );
         assert!(state.cached("deadbeef00000000").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn request_lines_waits_for_pending_requests() {
+        let server = MockServer::ok("[]");
+        let addr = server.base_url().trim_start_matches("http://").to_string();
+        let hanging = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+            let _ = stream.write_all(b"GET /hang");
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut stream =
+            std::net::TcpStream::connect(server.base_url().trim_start_matches("http://")).unwrap();
+        let _ = stream.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n\r\n");
+        let lines = server.request_lines();
+        assert!(!lines.is_empty());
+        hanging.join().unwrap();
     }
 
     #[test]
