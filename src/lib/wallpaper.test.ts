@@ -5,10 +5,10 @@ import {
   DEFAULT_WALLPAPER_SETTINGS,
   applyWallpaperToGhosty,
   downloadWallpaper,
-  fetchWallpaperThumb,
   loadWallpaperSettings,
   saveWallpaperSettings,
   searchWallpapers,
+  thumbUrl,
   type WallpaperItem,
 } from "./wallpaper";
 
@@ -65,6 +65,7 @@ describe("wallpaper", () => {
       id: "wallhaven-abc",
       source: "wallhaven",
       thumb_url: "https://thumb",
+      thumb_hash: "0123456789abcdef",
       full_url: "https://full",
       width: 1920,
       height: 1080,
@@ -73,12 +74,8 @@ describe("wallpaper", () => {
     expect(mockedInvoke).toHaveBeenCalledWith("download_wallpaper", { item });
   });
 
-  it("fetchWallpaperThumb invokes with the remote url", () => {
-    mockedInvoke.mockResolvedValue("data:image/jpeg;base64,AAAA");
-    void fetchWallpaperThumb("https://th.wallhaven.cc/small/x.jpg");
-    expect(mockedInvoke).toHaveBeenCalledWith("fetch_remote_image", {
-      url: "https://th.wallhaven.cc/small/x.jpg",
-    });
+  it("thumbUrl builds the thumb protocol url", () => {
+    expect(thumbUrl("0123456789abcdef")).toBe("thumb://0123456789abcdef");
   });
 
   it("loadWallpaperSettings merges stored values over defaults", async () => {

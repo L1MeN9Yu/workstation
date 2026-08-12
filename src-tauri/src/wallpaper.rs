@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::Client;
@@ -10,6 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 const USER_AGENT: &str = "workstation-wallpaper/0.1";
 const DEFAULT_MIN_WIDTH: u32 = 1920;
 const DEFAULT_MIN_HEIGHT: u32 = 1080;
+const CACHE_META_FILE: &str = "cache_meta.json";
+const MAX_CACHE_BYTES: u64 = 20_000_000_000; // 20GB（十进制）
 
 fn de_u32_string<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where
@@ -39,6 +43,7 @@ pub struct WallpaperItem {
     pub id: String,
     pub source: String,
     pub thumb_url: String,
+    pub thumb_hash: String,
     pub full_url: String,
     pub width: u32,
     pub height: u32,
@@ -199,13 +204,18 @@ async fn search_wallhaven(
         .data
         .into_iter()
         .filter(|it| it.dimension_x >= min_width && it.dimension_y >= min_height)
-        .map(|it| WallpaperItem {
-            id: format!("wallhaven-{}", it.id),
-            source: "wallhaven".to_string(),
-            thumb_url: it.thumbs.small,
-            full_url: it.path,
-            width: it.dimension_x,
-            height: it.dimension_y,
+        .map(|it| {
+            let thumb_url = it.thumbs.small;
+            let thumb_hash = thumb_hash(&thumb_url);
+            WallpaperItem {
+                id: format!("wallhaven-{}", it.id),
+                source: "wallhaven".to_string(),
+                thumb_url,
+                thumb_hash,
+                full_url: it.path,
+                width: it.dimension_x,
+                height: it.dimension_y,
+            }
         })
         .collect())
 }
@@ -281,6 +291,7 @@ async fn search_danbooru(
         out.push(WallpaperItem {
             id: format!("danbooru-{}", it.id),
             source: "danbooru".to_string(),
+            thumb_hash: thumb_hash(&thumb),
             thumb_url: thumb,
             full_url: full,
             width: it.image_width,
@@ -347,6 +358,7 @@ async fn search_safebooru(
         out.push(WallpaperItem {
             id: format!("safebooru-{}", it.id),
             source: "safebooru".to_string(),
+            thumb_hash: thumb_hash(&thumb),
             thumb_url: thumb,
             full_url: full,
             width: it.width,
@@ -445,49 +457,250 @@ pub fn default_download_dir() -> PathBuf {
     default_download_dir_from(dirs::home_dir())
 }
 
-const MAX_THUMB_BYTES: usize = 5 * 1024 * 1024;
-
-pub async fn fetch_thumb_image(url: String, settings: WallpaperSettings) -> Result<String, String> {
-    log::info!("fetch thumb: {url}");
-    let client = build_client(settings.proxy.as_deref())?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("thumb request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(http_error(resp.status(), "thumb"));
-    }
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("thumb read failed: {e}"))?;
-    validate_thumb_size(&bytes)?;
-    let mime = if content_type.contains("png") {
-        "image/png"
-    } else if content_type.contains("webp") {
-        "image/webp"
-    } else if content_type.contains("gif") {
-        "image/gif"
-    } else {
-        "image/jpeg"
-    };
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{encoded}"))
+pub fn thumb_hash(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
-fn validate_thumb_size(bytes: &[u8]) -> Result<(), String> {
-    if bytes.len() > MAX_THUMB_BYTES {
-        return Err(format!("thumb image too large: {} bytes", bytes.len()));
+pub fn mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/jpeg",
     }
-    Ok(())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThumbMetaEntry {
+    pub url: String,
+    pub size: u64,
+    pub ext: String,
+    pub last_access_ms: u64,
+}
+
+pub type ThumbIndex = HashMap<String, ThumbMetaEntry>;
+
+fn cache_file_path(dir: &Path, hash: &str, ext: &str) -> PathBuf {
+    dir.join(format!("{hash}.{ext}"))
+}
+
+fn load_thumb_index(dir: &Path) -> ThumbIndex {
+    let path = dir.join(CACHE_META_FILE);
+    match fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(index) => index,
+        None => rebuild_thumb_index(dir),
+    }
+}
+
+fn rebuild_thumb_index(dir: &Path) -> ThumbIndex {
+    let mut index = ThumbIndex::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return index;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == CACHE_META_FILE {
+            continue;
+        }
+        let Some((hash, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if hash.is_empty() || ext.len() > 5 {
+            continue;
+        }
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let last_access_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        index.insert(
+            hash.to_string(),
+            ThumbMetaEntry {
+                url: String::new(),
+                size: meta.len(),
+                ext: ext.to_string(),
+                last_access_ms,
+            },
+        );
+    }
+    index
+}
+
+fn save_thumb_index(dir: &Path, index: &ThumbIndex) {
+    if let Ok(json) = serde_json::to_string(index) {
+        let _ = fs::write(dir.join(CACHE_META_FILE), json);
+    }
+}
+
+fn prune_lru_locked(dir: &Path, index: &mut ThumbIndex, max_bytes: u64) {
+    let total: u64 = index.values().map(|e| e.size).sum();
+    if total <= max_bytes {
+        return;
+    }
+    let mut ordered: Vec<(String, u64)> = index
+        .iter()
+        .map(|(h, e)| (h.clone(), e.last_access_ms))
+        .collect();
+    ordered.sort_by_key(|(_, ts)| *ts);
+    for (hash, _) in ordered {
+        let remaining: u64 = index.values().map(|e| e.size).sum();
+        if remaining <= max_bytes {
+            break;
+        }
+        if let Some(entry) = index.remove(&hash) {
+            let _ = fs::remove_file(cache_file_path(dir, &hash, &entry.ext));
+        }
+    }
+}
+
+fn prune_lru(dir: &Path, index: &mut ThumbIndex) {
+    prune_lru_locked(dir, index, MAX_CACHE_BYTES);
+}
+
+fn lazy_prune_locked(dir: &Path, index: &mut ThumbIndex, active: &HashMap<String, String>) {
+    let stale: Vec<String> = index
+        .keys()
+        .filter(|hash| !active.contains_key(*hash))
+        .cloned()
+        .collect();
+    for hash in stale {
+        if let Some(entry) = index.remove(&hash) {
+            let _ = fs::remove_file(cache_file_path(dir, &hash, &entry.ext));
+        }
+    }
+    let _ = fs::write(
+        dir.join(CACHE_META_FILE),
+        serde_json::to_string(index).unwrap_or_default(),
+    );
+}
+
+pub struct ThumbState {
+    dir: PathBuf,
+    registry: RwLock<HashMap<String, String>>,
+    index: RwLock<ThumbIndex>,
+}
+
+impl ThumbState {
+    pub fn new(dir: PathBuf) -> Self {
+        let index = load_thumb_index(&dir);
+        Self {
+            dir,
+            registry: RwLock::new(HashMap::new()),
+            index: RwLock::new(index),
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn register(&self, items: &[WallpaperItem]) {
+        let mut registry = self.registry.write().unwrap();
+        for item in items {
+            registry.insert(item.thumb_hash.clone(), item.thumb_url.clone());
+        }
+        let mut index = self.index.write().unwrap();
+        lazy_prune_locked(&self.dir, &mut index, &registry);
+    }
+
+    pub fn resolve(&self, hash: &str) -> Option<String> {
+        self.registry.read().unwrap().get(hash).cloned()
+    }
+
+    pub fn cached(&self, hash: &str) -> Option<(Vec<u8>, &'static str)> {
+        let entry = self.index.read().unwrap().get(hash).cloned()?;
+        let path = cache_file_path(&self.dir, hash, &entry.ext);
+        if !path.is_file() {
+            return None;
+        }
+        let bytes = fs::read(&path).ok()?;
+        {
+            let mut index = self.index.write().unwrap();
+            if let Some(e) = index.get_mut(hash) {
+                e.last_access_ms = now_ms();
+            }
+        }
+        Some((bytes, mime_for_ext(&entry.ext)))
+    }
+
+    pub async fn get_or_fetch(
+        &self,
+        hash: &str,
+        settings: &WallpaperSettings,
+    ) -> Result<(Vec<u8>, &'static str), String> {
+        if let Some(hit) = self.cached(hash) {
+            return Ok(hit);
+        }
+        let url = self
+            .resolve(hash)
+            .ok_or_else(|| "unknown thumb hash".to_string())?;
+        let client = build_client(settings.proxy.as_deref())?;
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("thumb request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(http_error(resp.status(), "thumb"));
+        }
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_string();
+        let ext = extension_from_content_type(&content_type);
+        let path = cache_file_path(&self.dir, hash, ext);
+        let stream = resp.bytes_stream().map_err(std::io::Error::other);
+        write_download_stream(&path, stream).await?;
+        let size = fs::metadata(&path)
+            .map_err(|e| format!("cache stat failed: {e}"))?
+            .len();
+        {
+            let mut index = self.index.write().unwrap();
+            index.insert(
+                hash.to_string(),
+                ThumbMetaEntry {
+                    url,
+                    size,
+                    ext: ext.to_string(),
+                    last_access_ms: now_ms(),
+                },
+            );
+            prune_lru(&self.dir, &mut index);
+        }
+        save_thumb_index(&self.dir, &self.index.read().unwrap());
+        let bytes = fs::read(&path).map_err(|e| format!("cache read failed: {e}"))?;
+        Ok((bytes, mime_for_ext(ext)))
+    }
 }
 
 #[cfg(test)]
@@ -963,63 +1176,238 @@ mod tests {
     }
 
     #[test]
-    fn fetch_thumb_image_returns_base64_data_url() {
-        let server = MockServer::new(vec![(200, "png-bytes", "image/png")]);
-        let settings = WallpaperSettings {
+    fn thumb_hash_is_deterministic_16_hex_chars() {
+        let h1 = thumb_hash("https://t/1.jpg");
+        let h2 = thumb_hash("https://t/1.jpg");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16);
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(h1, thumb_hash("https://t/2.jpg"));
+    }
+
+    #[test]
+    fn mime_for_ext_maps_known_extensions() {
+        assert_eq!(mime_for_ext("png"), "image/png");
+        assert_eq!(mime_for_ext("webp"), "image/webp");
+        assert_eq!(mime_for_ext("gif"), "image/gif");
+        assert_eq!(mime_for_ext("jpg"), "image/jpeg");
+        assert_eq!(mime_for_ext("unknown"), "image/jpeg");
+    }
+
+    fn temp_cache_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "workstation-wall-thumb-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn empty_settings() -> WallpaperSettings {
+        WallpaperSettings {
             proxy: None,
             download_dir: None,
             sources: HashMap::new(),
             base_urls: HashMap::new(),
-        };
-        let data_url =
-            tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings)).unwrap();
-        assert!(data_url.starts_with("data:image/png;base64,"));
-    }
-
-    #[test]
-    fn fetch_thumb_image_rejects_http_error() {
-        let server = MockServer::new(vec![(404, "nope", "text/plain")]);
-        let settings = WallpaperSettings {
-            proxy: None,
-            download_dir: None,
-            sources: HashMap::new(),
-            base_urls: HashMap::new(),
-        };
-        let err = tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings))
-            .unwrap_err();
-        assert!(err.contains("thumb"));
-    }
-
-    #[test]
-    fn fetch_thumb_image_maps_mime_types() {
-        for (content_type, expected_mime) in [
-            ("image/webp", "image/webp"),
-            ("image/gif", "image/gif"),
-            ("application/octet-stream", "image/jpeg"),
-        ] {
-            let server = MockServer::new(vec![(200, "bytes", content_type)]);
-            let settings = WallpaperSettings {
-                proxy: None,
-                download_dir: None,
-                sources: HashMap::new(),
-                base_urls: HashMap::new(),
-            };
-            let data_url =
-                tauri::async_runtime::block_on(fetch_thumb_image(server.base_url(), settings))
-                    .unwrap();
-            assert!(
-                data_url.starts_with(&format!("data:{expected_mime};base64,")),
-                "expected {expected_mime}, got {data_url}"
-            );
         }
     }
 
+    fn state_with(dir: &Path, url: &str) -> ThumbState {
+        let state = ThumbState::new(dir.to_path_buf());
+        state.register(&[WallpaperItem {
+            id: "wallhaven-x".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: url.to_string(),
+            thumb_hash: thumb_hash(url),
+            full_url: String::new(),
+            width: 1920,
+            height: 1080,
+        }]);
+        state
+    }
+
     #[test]
-    fn validate_thumb_size_rejects_oversized_body() {
-        let big = vec![0u8; MAX_THUMB_BYTES + 1];
-        let err = validate_thumb_size(&big).unwrap_err();
-        assert!(err.contains("too large"));
-        assert!(validate_thumb_size(&[0u8; 10]).is_ok());
+    fn get_or_fetch_downloads_and_caches_on_first_request() {
+        let server = MockServer::new(vec![(200, "png-bytes", "image/png")]);
+        let dir = temp_cache_dir("first");
+        let state = state_with(&dir, &format!("{}/img", server.base_url()));
+        let (bytes, mime) = tauri::async_runtime::block_on(state.get_or_fetch(
+            &thumb_hash(&format!("{}/img", server.base_url())),
+            &empty_settings(),
+        ))
+        .unwrap();
+        assert_eq!(bytes, b"png-bytes");
+        assert_eq!(mime, "image/png");
+        assert_eq!(server.hit_count(), 1);
+        let cached = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".png"));
+        assert!(cached, "cache file with .png ext should exist");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_or_fetch_hits_cache_without_network_again() {
+        let server = MockServer::new(vec![(200, "img-bytes", "image/jpeg")]);
+        let dir = temp_cache_dir("hit");
+        let url = format!("{}/img", server.base_url());
+        let state = state_with(&dir, &url);
+        let hash = thumb_hash(&url);
+        tauri::async_runtime::block_on(state.get_or_fetch(&hash, &empty_settings())).unwrap();
+        assert_eq!(server.hit_count(), 1);
+        let (bytes, mime) =
+            tauri::async_runtime::block_on(state.get_or_fetch(&hash, &empty_settings())).unwrap();
+        assert_eq!(bytes, b"img-bytes");
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(server.hit_count(), 1, "second fetch must not hit network");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_or_fetch_caches_large_body_without_size_limit() {
+        let big = "x".repeat(6 * 1024 * 1024);
+        let server = MockServer::new(vec![(200, Box::leak(big.into_boxed_str()), "image/jpeg")]);
+        let dir = temp_cache_dir("big");
+        let url = format!("{}/img", server.base_url());
+        let state = state_with(&dir, &url);
+        let (bytes, mime) = tauri::async_runtime::block_on(
+            state.get_or_fetch(&thumb_hash(&url), &empty_settings()),
+        )
+        .unwrap();
+        assert_eq!(bytes.len(), 6 * 1024 * 1024);
+        assert_eq!(mime, "image/jpeg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_or_fetch_rejects_http_error() {
+        let server = MockServer::new(vec![(404, "nope", "text/plain")]);
+        let dir = temp_cache_dir("err");
+        let url = format!("{}/img", server.base_url());
+        let state = state_with(&dir, &url);
+        let err = tauri::async_runtime::block_on(
+            state.get_or_fetch(&thumb_hash(&url), &empty_settings()),
+        )
+        .unwrap_err();
+        assert!(err.contains("thumb"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_or_fetch_unknown_hash_returns_error() {
+        let dir = temp_cache_dir("unknown");
+        let state = ThumbState::new(dir.clone());
+        let err = tauri::async_runtime::block_on(
+            state.get_or_fetch("deadbeefdeadbeef", &empty_settings()),
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown thumb hash"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_hit_updates_last_access_in_index() {
+        let server = MockServer::new(vec![(200, "img-bytes", "image/jpeg")]);
+        let dir = temp_cache_dir("touch");
+        let url = format!("{}/img", server.base_url());
+        let state = state_with(&dir, &url);
+        let hash = thumb_hash(&url);
+        tauri::async_runtime::block_on(state.get_or_fetch(&hash, &empty_settings())).unwrap();
+        let before = {
+            let index = state.index.read().unwrap();
+            index.get(&hash).unwrap().last_access_ms
+        };
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tauri::async_runtime::block_on(state.get_or_fetch(&hash, &empty_settings())).unwrap();
+        let after = {
+            let index = state.index.read().unwrap();
+            index.get(&hash).unwrap().last_access_ms
+        };
+        assert!(after > before, "last_access_ms must increase on hit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_lru_evicts_oldest_beyond_capacity() {
+        let dir = temp_cache_dir("lru");
+        let mut index = ThumbIndex::new();
+        for i in 0..3 {
+            let hash = format!("h{i:016x}");
+            std::fs::write(cache_file_path(&dir, &hash, "jpg"), vec![0u8; 100]).unwrap();
+            index.insert(
+                hash,
+                ThumbMetaEntry {
+                    url: format!("u{i}"),
+                    size: 100,
+                    ext: "jpg".to_string(),
+                    last_access_ms: i as u64,
+                },
+            );
+        }
+        prune_lru_locked(&dir, &mut index, 250);
+        assert!(!index.contains_key("h0000000000000000"), "oldest evicted");
+        assert!(index.contains_key("h0000000000000001"));
+        assert!(index.contains_key("h0000000000000002"));
+        assert!(!cache_file_path(&dir, "h0000000000000000", "jpg").exists());
+        assert!(index.values().map(|e| e.size).sum::<u64>() <= 250);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_lru_keeps_index_within_capacity_when_under_limit() {
+        let dir = temp_cache_dir("lru-under");
+        let mut index = ThumbIndex::new();
+        index.insert(
+            "h0000000000000000".to_string(),
+            ThumbMetaEntry {
+                url: "u".to_string(),
+                size: 10,
+                ext: "jpg".to_string(),
+                last_access_ms: 1,
+            },
+        );
+        prune_lru_locked(&dir, &mut index, 250);
+        assert_eq!(index.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_thumb_index_rebuilds_from_directory_when_corrupted() {
+        let dir = temp_cache_dir("rebuild");
+        std::fs::write(dir.join(CACHE_META_FILE), "not json").unwrap();
+        std::fs::write(cache_file_path(&dir, "h0000000000000001", "png"), "abc").unwrap();
+        std::fs::write(cache_file_path(&dir, "h0000000000000002", "jpg"), "defg").unwrap();
+        let index = load_thumb_index(&dir);
+        assert_eq!(index.len(), 2);
+        assert_eq!(index["h0000000000000001"].ext, "png");
+        assert_eq!(index["h0000000000000001"].size, 3);
+        assert_eq!(index["h0000000000000002"].ext, "jpg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn register_lazy_prunes_stale_cache_files() {
+        let dir = temp_cache_dir("lazy");
+        std::fs::write(cache_file_path(&dir, "stale000000000000", "jpg"), "x").unwrap();
+        std::fs::write(cache_file_path(&dir, "deadbeef00000000", "png"), "y").unwrap();
+        let state = ThumbState::new(dir.clone());
+        let url = "https://t/live.jpg";
+        let hash = thumb_hash(url);
+        state.register(&[WallpaperItem {
+            id: "wallhaven-live".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: url.to_string(),
+            thumb_hash: hash.clone(),
+            full_url: String::new(),
+            width: 1920,
+            height: 1080,
+        }]);
+        assert!(!cache_file_path(&dir, "stale000000000000", "jpg").exists());
+        assert!(!cache_file_path(&dir, "deadbeef00000000", "png").exists());
+        assert_eq!(state.resolve(&hash), Some(url.to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1031,6 +1419,7 @@ mod tests {
             id: "wallhaven-test123".to_string(),
             source: "wallhaven".to_string(),
             thumb_url: String::new(),
+            thumb_hash: String::new(),
             full_url: format!("{}/img", server.base_url()),
             width: 1920,
             height: 1080,
@@ -1057,6 +1446,7 @@ mod tests {
             id: "danbooru-42".to_string(),
             source: "danbooru".to_string(),
             thumb_url: String::new(),
+            thumb_hash: String::new(),
             full_url: format!("{}/img", server.base_url()),
             width: 1920,
             height: 1080,
@@ -1080,6 +1470,7 @@ mod tests {
             id: "x-1".to_string(),
             source: "wallhaven".to_string(),
             thumb_url: String::new(),
+            thumb_hash: String::new(),
             full_url: format!("{}/img", server.base_url()),
             width: 1920,
             height: 1080,
@@ -1095,6 +1486,7 @@ mod tests {
             id: "x-2".to_string(),
             source: "wallhaven".to_string(),
             thumb_url: String::new(),
+            thumb_hash: String::new(),
             full_url: "http://127.0.0.1:1/unreachable".to_string(),
             width: 1920,
             height: 1080,
@@ -1110,6 +1502,7 @@ mod tests {
             id: "x-3".to_string(),
             source: "wallhaven".to_string(),
             thumb_url: String::new(),
+            thumb_hash: String::new(),
             full_url: "https://example.com/img.jpg".to_string(),
             width: 1920,
             height: 1080,
@@ -1134,6 +1527,7 @@ mod tests {
             id: "x-4".to_string(),
             source: "wallhaven".to_string(),
             thumb_url: String::new(),
+            thumb_hash: String::new(),
             full_url: format!("{}/img", server.base_url()),
             width: 1920,
             height: 1080,
@@ -1157,6 +1551,7 @@ mod tests {
             id: "safebooru-99".to_string(),
             source: "safebooru".to_string(),
             thumb_url: String::new(),
+            thumb_hash: String::new(),
             full_url: format!("{}/img", server.base_url()),
             width: 1920,
             height: 1080,

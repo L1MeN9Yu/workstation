@@ -12,6 +12,7 @@ export interface WallpaperItem {
   id: string;
   source: string;
   thumb_url: string;
+  thumb_hash: string;
   full_url: string;
   width: number;
   height: number;
@@ -85,8 +86,8 @@ export function downloadWallpaper(item: WallpaperItem): Promise<string> {
   return invoke<string>("download_wallpaper", { item });
 }
 
-export function fetchWallpaperThumb(url: string): Promise<string> {
-  return invoke<string>("fetch_remote_image", { url });
+export function thumbUrl(hash: string): string {
+  return `thumb://${hash}`;
 }
 
 function mergeSourceSettings(
