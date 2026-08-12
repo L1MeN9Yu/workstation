@@ -618,10 +618,6 @@ impl ThumbState {
         }
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     pub fn register(&self, items: &[WallpaperItem]) {
         let mut registry = self.registry.write().unwrap();
         for item in items {
@@ -1384,6 +1380,70 @@ mod tests {
         assert_eq!(index["h0000000000000001"].ext, "png");
         assert_eq!(index["h0000000000000001"].size, 3);
         assert_eq!(index["h0000000000000002"].ext, "jpg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_thumb_index_reads_valid_meta() {
+        let dir = temp_cache_dir("index-load");
+        let mut idx = ThumbIndex::new();
+        idx.insert(
+            "cafe0000000000001".to_string(),
+            ThumbMetaEntry {
+                url: "https://t/1.jpg".to_string(),
+                size: 3,
+                ext: "png".to_string(),
+                last_access_ms: 42,
+            },
+        );
+        save_thumb_index(&dir, &idx);
+        let loaded = load_thumb_index(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded["cafe0000000000001"].ext, "png");
+        assert_eq!(loaded["cafe0000000000001"].size, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumb_state_new_with_missing_dir_is_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "workstation-wall-thumb-nodir-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = ThumbState::new(dir.clone());
+        assert!(state.resolve("anything").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebuild_thumb_index_skips_unrelated_entries() {
+        let dir = temp_cache_dir("rebuild-skip");
+        std::fs::write(dir.join("noext"), "x").unwrap();
+        std::fs::write(dir.join(".jpg"), "x").unwrap();
+        std::fs::write(dir.join("hash1234567890.verylong"), "x").unwrap();
+        std::fs::create_dir(dir.join("subdir")).unwrap();
+        std::fs::write(cache_file_path(&dir, "cafe0000000000001", "png"), "abc").unwrap();
+        let index = rebuild_thumb_index(&dir);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index["cafe0000000000001"].ext, "png");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_returns_none_when_index_entry_file_missing() {
+        let dir = temp_cache_dir("cached-missing");
+        let state = ThumbState::new(dir.clone());
+        state.index.write().unwrap().insert(
+            "deadbeef00000000".to_string(),
+            ThumbMetaEntry {
+                url: "u".to_string(),
+                size: 1,
+                ext: "jpg".to_string(),
+                last_access_ms: 1,
+            },
+        );
+        assert!(state.cached("deadbeef00000000").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
