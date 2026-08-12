@@ -34,6 +34,7 @@ export interface SourceSettings {
   minHeight: string;
   rating: string;
   seed: string;
+  ratios: string;
 }
 
 export interface WallpaperSettings {
@@ -93,6 +94,18 @@ export function selectionsToBits(
   return groups.map((g) => (selected.includes(g.key) ? "1" : "0")).join("");
 }
 
+/** wallhaven 常见宽高比选项（与官方 API ratios 取值一致） */
+export const RATIO_OPTIONS = [
+  "16x9",
+  "16x10",
+  "21x9",
+  "32x9",
+  "48x27",
+  "9x16",
+  "10x16",
+  "9x21",
+];
+
 /** 生成一个 wallhaven 随机搜索用的随机 seed（小写字母+数字） */
 export function generateSeed(length = 12): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -112,6 +125,7 @@ export const DEFAULT_SOURCE_SETTINGS: SourceSettings = {
   minHeight: "1080",
   rating: "safe",
   seed: "",
+  ratios: "",
 };
 
 export const DEFAULT_WALLPAPER_SETTINGS: WallpaperSettings = {
@@ -164,6 +178,7 @@ function mergeSourceSettings(
     minHeight: stored?.minHeight ?? defaults.minHeight,
     rating: stored?.rating ?? defaults.rating,
     seed: stored?.seed ?? defaults.seed,
+    ratios: stored?.ratios ?? defaults.ratios,
   };
 }
 

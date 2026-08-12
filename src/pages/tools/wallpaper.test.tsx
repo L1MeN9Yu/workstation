@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("../../lib/wallpaper", () => ({
+  RATIO_OPTIONS: ["16x9", "16x10", "21x9", "32x9", "48x27", "9x16", "10x16", "9x21"],
   BIT_GROUPS: {
     categories: [
       { key: "General", label: "综合" },
@@ -84,6 +85,7 @@ describe("WallpaperTool", () => {
           minHeight: "1080",
           rating: "safe",
           seed: "",
+          ratios: "",
         },
         danbooru: {
           apiKey: "",
@@ -94,6 +96,7 @@ describe("WallpaperTool", () => {
           minHeight: "1080",
           rating: "safe",
           seed: "",
+          ratios: "",
         },
         safebooru: {
           apiKey: "",
@@ -104,6 +107,7 @@ describe("WallpaperTool", () => {
           minHeight: "",
           rating: "",
           seed: "",
+          ratios: "",
         },
       },
     });
@@ -529,8 +533,9 @@ describe("WallpaperTool", () => {
     expect(container.textContent).toContain("API Key");
     expect(container.textContent).toContain("purity");
     expect(container.textContent).toContain("categories");
-    expect(container.textContent).toContain("最小宽度");
-    expect(container.textContent).toContain("最小高度");
+    expect(container.textContent).toContain("ratios");
+    expect(container.textContent).not.toContain("最小宽度");
+    expect(container.textContent).not.toContain("最小高度");
     expect(container.textContent).not.toContain("Danbooru 参数");
     expect(container.textContent).not.toContain("Safebooru 参数");
 
@@ -589,7 +594,7 @@ describe("WallpaperTool", () => {
     const generalLabel = labels.find((l) =>
       l.textContent?.includes("综合"),
     )!;
-    expect(checkboxes).toHaveLength(6);
+    expect(checkboxes).toHaveLength(14);
     expect(animeLabel.querySelector("input")!.checked).toBe(true);
     expect(generalLabel.querySelector("input")!.checked).toBe(false);
   });
@@ -618,6 +623,171 @@ describe("WallpaperTool", () => {
     }
   });
 
+  it("renders ratios as multiselect checkboxes", async () => {
+    await flush();
+    expect(container.textContent).toContain("ratios");
+    expect(container.textContent).toContain("16x9");
+    expect(container.textContent).toContain("21x9");
+    const labels = Array.from(container.querySelectorAll("label"));
+    const ratioLabels = labels.filter((l) =>
+      ["16x9", "21x9", "9x16"].some((r) => l.textContent?.includes(r)),
+    );
+    expect(ratioLabels).toHaveLength(3);
+    expect(
+      ratioLabels.every((l) => !l.querySelector("input")!.checked),
+    ).toBe(true);
+  });
+
+  it("writes checked ratios back as comma-joined string on save", async () => {
+    vi.useFakeTimers();
+    try {
+      await flush();
+      const labels = Array.from(container.querySelectorAll("label"));
+      const ratioLabels = labels.filter((l) =>
+        ["16x9", "21x9"].some((r) => l.textContent === r),
+      );
+      expect(ratioLabels).toHaveLength(2);
+      for (const l of ratioLabels) {
+        await act(async () => {
+          l.querySelector("input")!.click();
+        });
+      }
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(saveWallpaperSources).toHaveBeenCalledWith(
+        expect.objectContaining({
+          wallhaven: expect.objectContaining({ ratios: "16x9,21x9" }),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reflects stored ratios back to checked state", async () => {
+    vi.mocked(loadWallpaperSettings).mockResolvedValue({
+      proxy: "",
+      downloadDir: "",
+      sources: {
+        wallhaven: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "16x9,9x16",
+        },
+        danbooru: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "",
+        },
+        safebooru: {
+          apiKey: "",
+          login: "",
+          categories: "",
+          purity: "",
+          minWidth: "1920",
+          minHeight: "",
+          rating: "",
+          seed: "",
+          ratios: "",
+        },
+      },
+    });
+    act(() => {
+      root.unmount();
+    });
+    root = setup(container);
+    await flush();
+    const labels = Array.from(container.querySelectorAll("label"));
+    const checked = labels
+      .filter((l) => l.querySelector("input")?.checked)
+      .map((l) => l.textContent?.trim());
+    expect(checked).toContain("16x9");
+    expect(checked).toContain("9x16");
+    expect(checked).not.toContain("21x9");
+  });
+
+  it("unchecking all ratios clears the stored value", async () => {
+    vi.mocked(loadWallpaperSettings).mockResolvedValue({
+      proxy: "",
+      downloadDir: "",
+      sources: {
+        wallhaven: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "16x9,21x9",
+        },
+        danbooru: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "",
+        },
+        safebooru: {
+          apiKey: "",
+          login: "",
+          categories: "",
+          purity: "",
+          minWidth: "1920",
+          minHeight: "",
+          rating: "",
+          seed: "",
+          ratios: "",
+        },
+      },
+    });
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        root.unmount();
+      });
+      root = setup(container);
+      await flush();
+      const labels = Array.from(container.querySelectorAll("label"));
+      const checkedLabels = labels.filter(
+        (l) => l.querySelector("input")?.checked,
+      );
+      for (const l of checkedLabels) {
+        await act(async () => {
+          l.querySelector("input")!.click();
+        });
+      }
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(saveWallpaperSources).toHaveBeenCalledWith(
+        expect.objectContaining({
+          wallhaven: expect.objectContaining({ ratios: "" }),
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects unchecking the last category option with an inline hint", async () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
       proxy: "",
@@ -632,6 +802,7 @@ describe("WallpaperTool", () => {
           minHeight: "1080",
           rating: "safe",
           seed: "",
+          ratios: "",
         },
         danbooru: {
           apiKey: "",
@@ -642,6 +813,7 @@ describe("WallpaperTool", () => {
           minHeight: "1080",
           rating: "safe",
           seed: "",
+          ratios: "",
         },
         safebooru: {
           apiKey: "",
@@ -652,6 +824,7 @@ describe("WallpaperTool", () => {
           minHeight: "",
           rating: "",
           seed: "",
+          ratios: "",
         },
       },
     });
@@ -694,6 +867,12 @@ describe("WallpaperTool", () => {
 
   it("filters negative values in number inputs", async () => {
     await flush();
+    const safebooruTab = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Safebooru",
+    )!;
+    await act(async () => {
+      safebooruTab.click();
+    });
     const numberInputs = Array.from(
       container.querySelectorAll('input[type="number"]'),
     );
