@@ -33,6 +33,7 @@ export interface SourceSettings {
   minWidth: string;
   minHeight: string;
   rating: string;
+  seed: string;
 }
 
 export interface WallpaperSettings {
@@ -47,6 +48,61 @@ export interface WallpaperSettingsInput {
   sources?: Record<string, Partial<SourceSettings>>;
 }
 
+export interface BitGroup {
+  /** 选项标识，与 wallhaven API 位标记位置一一对应 */
+  key: string;
+  /** UI 展示的中文标签 */
+  label: string;
+}
+
+/** wallhaven 三位位标记参数的位置序定义（第 1 位 / 第 2 位 / 第 3 位，与官方 API 位序一致） */
+export const BIT_GROUPS: Record<string, BitGroup[]> = {
+  categories: [
+    { key: "General", label: "综合" },
+    { key: "Anime", label: "动漫" },
+    { key: "People", label: "人物" },
+  ],
+  purity: [
+    { key: "SFW", label: "SFW" },
+    { key: "Sketchy", label: "Sketchy" },
+    { key: "NSFW", label: "NSFW" },
+  ],
+};
+
+/**
+ * 将三位位标记字符串解码为勾选集合（按位置序）。
+ * 每位非 `1` 即视为未勾选（非法字符容错），空串返回空集。
+ */
+export function bitsToSelections(value: string, groups: BitGroup[]): string[] {
+  const selected: string[] = [];
+  for (let i = 0; i < groups.length; i++) {
+    if (value[i] === "1") {
+      selected.push(groups[i].key);
+    }
+  }
+  return selected;
+}
+
+/**
+ * 将勾选集合编码为三位位标记字符串，全部不勾选输出 `"000"`。
+ */
+export function selectionsToBits(
+  selected: string[],
+  groups: BitGroup[],
+): string {
+  return groups.map((g) => (selected.includes(g.key) ? "1" : "0")).join("");
+}
+
+/** 生成一个 wallhaven 随机搜索用的随机 seed（小写字母+数字） */
+export function generateSeed(length = 12): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
 export const DEFAULT_SOURCE_SETTINGS: SourceSettings = {
   apiKey: "",
   login: "",
@@ -55,6 +111,7 @@ export const DEFAULT_SOURCE_SETTINGS: SourceSettings = {
   minWidth: "1920",
   minHeight: "1080",
   rating: "safe",
+  seed: "",
 };
 
 export const DEFAULT_WALLPAPER_SETTINGS: WallpaperSettings = {
@@ -77,9 +134,13 @@ export const DEFAULT_WALLPAPER_SETTINGS: WallpaperSettings = {
 };
 
 const SETTINGS_KEY = "wallpaper";
+const SOURCES_KEY = "wallpaperSources";
 
-export function searchWallpapers(query: SearchQuery): Promise<WallpaperItem[]> {
-  return invoke<WallpaperItem[]>("search_wallpapers", { query });
+export function searchWallpapers(
+  query: SearchQuery,
+  settings?: WallpaperSettings,
+): Promise<WallpaperItem[]> {
+  return invoke<WallpaperItem[]>("search_wallpapers", { query, settings });
 }
 
 export function downloadWallpaper(item: WallpaperItem): Promise<string> {
@@ -102,16 +163,27 @@ function mergeSourceSettings(
     minWidth: stored?.minWidth ?? defaults.minWidth,
     minHeight: stored?.minHeight ?? defaults.minHeight,
     rating: stored?.rating ?? defaults.rating,
+    seed: stored?.seed ?? defaults.seed,
   };
 }
 
 export async function loadWallpaperSettings(): Promise<WallpaperSettings> {
-  const stored = await readConfig<WallpaperSettingsInput>(SETTINGS_KEY);
+  const [stored, storedSources] = await Promise.all([
+    readConfig<WallpaperSettingsInput>(SETTINGS_KEY),
+    readConfig<{ sources?: Record<string, Partial<SourceSettings>> }>(
+      SOURCES_KEY,
+    ),
+  ]);
+  // 新 key wallpaperSources 优先，旧版 wallpaper.sources 兼容兜底
+  const rawSources =
+    storedSources?.sources ??
+    stored?.sources ??
+    DEFAULT_WALLPAPER_SETTINGS.sources;
   const sources: Record<string, SourceSettings> = {};
   for (const [id, defaults] of Object.entries(
     DEFAULT_WALLPAPER_SETTINGS.sources,
   )) {
-    sources[id] = mergeSourceSettings(stored?.sources?.[id], defaults);
+    sources[id] = mergeSourceSettings(rawSources[id], defaults);
   }
   return {
     proxy: stored?.proxy ?? DEFAULT_WALLPAPER_SETTINGS.proxy,
@@ -120,10 +192,18 @@ export async function loadWallpaperSettings(): Promise<WallpaperSettings> {
   };
 }
 
-export async function saveWallpaperSettings(
-  settings: WallpaperSettings,
+/** 保存代理/下载目录（全局网络配置，手动保存） */
+export async function saveWallpaperProxy(
+  settings: Pick<WallpaperSettings, "proxy" | "downloadDir">,
 ): Promise<void> {
   await writeConfig(SETTINGS_KEY, settings);
+}
+
+/** 保存各图源搜索参数（高频修改，自动保存） */
+export async function saveWallpaperSources(
+  sources: WallpaperSettings["sources"],
+): Promise<void> {
+  await writeConfig(SOURCES_KEY, { sources });
 }
 
 export interface ApplyWallpaperResult {

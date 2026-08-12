@@ -72,6 +72,7 @@ pub struct SourceSettings {
     #[serde(deserialize_with = "de_u32_string")]
     pub min_height: Option<u32>,
     pub rating: Option<String>,
+    pub seed: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -182,6 +183,9 @@ async fn search_wallhaven(
         if query.random {
             pairs.append_pair("sorting", "random");
             pairs.append_pair("order", "desc");
+            if let Some(seed) = src.seed.as_deref().filter(|s| !s.trim().is_empty()) {
+                pairs.append_pair("seed", seed.trim());
+            }
         }
         let kw = query.keywords.trim();
         if !kw.is_empty() {
@@ -931,6 +935,7 @@ mod tests {
             min_height: Some(1080),
             rating: None,
             login: None,
+            seed: None,
         };
         let items = tauri::async_runtime::block_on(search_wallhaven(
             &client,
@@ -967,6 +972,48 @@ mod tests {
         .unwrap();
         assert!(items.is_empty());
         assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn search_wallhaven_random_adds_seed_when_configured() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: true,
+            ..Default::default()
+        };
+        let src = SourceSettings {
+            seed: Some("abc123".to_string()),
+            ..SourceSettings::default()
+        };
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("seed=abc123"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn search_wallhaven_random_omits_empty_seed() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: true,
+            ..Default::default()
+        };
+        let src = SourceSettings {
+            seed: Some("   ".to_string()),
+            ..SourceSettings::default()
+        };
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("seed="), "got: {}", lines[0]);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs;
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -6,7 +7,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::{
     cmux_config_path, ghosty_config_path, read_cmux_config_at, read_config as read_config_impl,
     read_ghosty_config_at, reload_cmux_config_impl,
-    wallpaper::{self, SearchQuery, ThumbState, WallpaperItem, WallpaperSettings},
+    wallpaper::{self, SearchQuery, SourceSettings, ThumbState, WallpaperItem, WallpaperSettings},
     write_cmux_config_at, write_config as write_config_impl, write_ghosty_config_at,
     CmuxConfigFile, CmuxReloadStatus,
 };
@@ -57,7 +58,7 @@ pub fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
 
 fn wallpaper_settings_from_config() -> WallpaperSettings {
     let raw = read_config_impl("wallpaper".to_string());
-    match raw {
+    let mut settings: WallpaperSettings = match raw {
         Ok(value) => {
             log::debug!("wallpaper config raw: {value}");
             match serde_json::from_value::<WallpaperSettings>(value) {
@@ -80,15 +81,25 @@ fn wallpaper_settings_from_config() -> WallpaperSettings {
             log::warn!("wallpaper config read failed: {e}, falling back to defaults");
             WallpaperSettings::default()
         }
+    };
+    if let Ok(value) = read_config_impl("wallpaperSources".to_string()) {
+        if let Some(sources) = value.get("sources") {
+            match serde_json::from_value::<HashMap<String, SourceSettings>>(sources.clone()) {
+                Ok(sources) => settings.sources = sources,
+                Err(e) => log::error!("wallpaperSources config parse failed: {e}"),
+            }
+        }
     }
+    settings
 }
 
 #[tauri::command]
 pub async fn search_wallpapers(
     app: AppHandle,
     query: SearchQuery,
+    settings: Option<WallpaperSettings>,
 ) -> Result<Vec<WallpaperItem>, String> {
-    let settings = wallpaper_settings_from_config();
+    let settings = settings.unwrap_or_else(wallpaper_settings_from_config);
     let items = wallpaper::search_wallpapers(query, settings.clone()).await?;
     let state = app.state::<ThumbState>();
     state.register(&items);

@@ -2,11 +2,16 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import { listen } from "@tauri-apps/api/event";
 import { ToolPage } from "../ToolPage";
 import {
+  BIT_GROUPS,
   applyWallpaperToGhosty,
+  bitsToSelections,
   downloadWallpaper,
+  generateSeed,
   loadWallpaperSettings,
-  saveWallpaperSettings,
+  saveWallpaperProxy,
+  saveWallpaperSources,
   searchWallpapers,
+  selectionsToBits,
   thumbUrl,
   type SourceSettings,
   type WallpaperItem,
@@ -24,6 +29,7 @@ interface SearchError {
 
 const MAX_THUMB_ATTEMPTS = 6;
 const THUMB_RETRY_MS = 1000;
+const SOURCE_SAVE_DEBOUNCE_MS = 500;
 
 const thumbReadyListeners = new Set<() => void>();
 let thumbReadyVersion = 0;
@@ -139,11 +145,16 @@ function ProxiedThumb({ hash, alt, className }: ProxiedThumbProps) {
   );
 }
 
+type FieldType = "text" | "checkbox" | "select" | "number" | "seed";
+
 interface SourceFieldDef {
   key: keyof SourceSettings;
   label: string;
-  placeholder: string;
+  placeholder?: string;
   hint?: string;
+  type?: FieldType;
+  options?: string[];
+  groups?: string[];
 }
 
 const SOURCE_FIELDS: Record<string, SourceFieldDef[]> = {
@@ -154,10 +165,33 @@ const SOURCE_FIELDS: Record<string, SourceFieldDef[]> = {
       placeholder: "wallhaven 设置页获取（可选）",
       hint: "填写后可访问更高 purity 分级内容",
     },
-    { key: "purity", label: "purity", placeholder: "100" },
-    { key: "categories", label: "categories", placeholder: "010" },
-    { key: "minWidth", label: "最小宽度", placeholder: "1920" },
-    { key: "minHeight", label: "最小高度", placeholder: "1080" },
+    {
+      key: "purity",
+      label: "purity",
+      type: "checkbox",
+      groups: ["SFW", "Sketchy", "NSFW"],
+      hint: "至少勾选一项",
+    },
+    {
+      key: "categories",
+      label: "categories",
+      type: "checkbox",
+      groups: ["General", "Anime", "People"],
+      hint: "至少勾选一项",
+    },
+    { key: "minWidth", label: "最小宽度", type: "number", placeholder: "1920" },
+    {
+      key: "minHeight",
+      label: "最小高度",
+      type: "number",
+      placeholder: "1080",
+    },
+    {
+      key: "seed",
+      label: "seed",
+      type: "seed",
+      hint: "随机搜索的种子，点击刷新可换一批结果",
+    },
   ],
   danbooru: [
     {
@@ -172,11 +206,15 @@ const SOURCE_FIELDS: Record<string, SourceFieldDef[]> = {
       placeholder: "账户设置页生成（可选）",
       hint: "以 HTTP Basic 认证方式随请求发送",
     },
-    { key: "rating", label: "rating", placeholder: "safe" },
+    {
+      key: "rating",
+      label: "rating",
+      type: "select",
+      options: ["safe", "questionable", "explicit", ""],
+      hint: "不限则留空",
+    },
   ],
-  safebooru: [
-    { key: "minWidth", label: "最小宽度", placeholder: "1920" },
-  ],
+  safebooru: [{ key: "minWidth", label: "最小宽度", type: "number", placeholder: "1920" }],
 };
 
 export default function WallpaperTool() {
@@ -189,8 +227,32 @@ export default function WallpaperTool() {
   const [settings, setSettings] = useState<WallpaperSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
+  const [checkboxBlocked, setCheckboxBlocked] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const pageRef = useRef(1);
+  const saveTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
+
+  function scheduleSourceSave(
+    sources: WallpaperSettings["sources"],
+  ): void {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      void saveWallpaperSources(sources)
+        .then(() => setStatus("参数已自动保存"))
+        .catch((e) => setStatus(`自动保存失败：${String(e)}`));
+    }, SOURCE_SAVE_DEBOUNCE_MS);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -210,12 +272,15 @@ export default function WallpaperTool() {
     setStatus(null);
     setErrors([]);
     try {
-      const result = await searchWallpapers({
-        source,
-        keywords: random ? "" : keywords,
-        random,
-        page,
-      });
+      const result = await searchWallpapers(
+        {
+          source,
+          keywords: random ? "" : keywords,
+          random,
+          page,
+        },
+        settings,
+      );
       setItems((prev) => (page > 1 ? [...prev, ...result] : result));
       setHasMore(result.length > 0);
       if (result.length === 0 && page === 1) {
@@ -258,10 +323,36 @@ export default function WallpaperTool() {
     }
   }
 
+  async function handleRefreshSeed() {
+    if (!settings) return;
+    const updated = {
+      ...settings,
+      sources: {
+        ...settings.sources,
+        wallhaven: {
+          ...settings.sources.wallhaven,
+          seed: generateSeed(),
+        },
+      },
+    };
+    setSettings(updated);
+    setStatus(null);
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    try {
+      await saveWallpaperSources(updated.sources);
+      setStatus("seed 已刷新并保存");
+    } catch (e) {
+      setStatus(`保存 seed 失败：${String(e)}`);
+    }
+  }
+
   async function handleSaveSettings() {
     if (!settings) return;
     try {
-      await saveWallpaperSettings(settings);
+      await saveWallpaperProxy(settings);
       setStatus("设置已保存");
       setShowSettings(false);
     } catch (e) {
@@ -275,18 +366,39 @@ export default function WallpaperTool() {
     value: string,
   ): void {
     if (!settings) return;
-    setSettings({
-      ...settings,
-      sources: {
-        ...settings.sources,
-        [sourceId]: {
-          ...settings.sources[sourceId],
-          [key]: value,
-        },
+    const nextSources = {
+      ...settings.sources,
+      [sourceId]: {
+        ...settings.sources[sourceId],
+        [key]: value,
       },
-    });
+    };
+    setSettings({ ...settings, sources: nextSources });
+    scheduleSourceSave(nextSources);
   }
 
+  function handleCheckboxChange(
+    sourceId: string,
+    key: keyof SourceSettings,
+    option: string,
+    checked: boolean,
+  ): void {
+    if (!settings) return;
+    const groups = BIT_GROUPS[key] ?? [];
+    const current = bitsToSelections(
+      settings.sources[sourceId]?.[key] ?? "",
+      groups,
+    );
+    const next = checked
+      ? [...current, option]
+      : current.filter((k) => k !== option);
+    if (next.length === 0) {
+      setCheckboxBlocked(key as string);
+      return;
+    }
+    setCheckboxBlocked(null);
+    updateSourceField(sourceId, key, selectionsToBits(next, groups));
+  }
   const inputClass =
     "mt-1 w-full rounded-md border border-gray-300 bg-gray-50 px-2 py-1 font-mono text-sm dark:border-gray-600 dark:bg-gray-900";
 
@@ -387,22 +499,119 @@ export default function WallpaperTool() {
             }
             return (
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                {fields.map((f) => (
-                  <label key={f.key} className="block text-xs">
-                    {f.label}
-                    <input
-                      value={src[f.key]}
-                      onChange={(e) =>
-                        updateSourceField(source, f.key, e.target.value)
-                      }
-                      placeholder={f.placeholder}
-                      className={inputClass}
-                    />
-                    {f.hint && (
-                      <span className="text-gray-400">{f.hint}</span>
-                    )}
-                  </label>
-                ))}
+                {fields.map((f) => {
+                  if (f.type === "checkbox") {
+                    const groups = BIT_GROUPS[f.key] ?? [];
+                    const selected = bitsToSelections(
+                      src[f.key] ?? "",
+                      groups,
+                    );
+                    return (
+                      <div
+                        key={f.key}
+                        className="col-span-2 sm:col-span-3"
+                      >
+                        <span className="block text-xs">{f.label}</span>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-gray-300 bg-gray-50 px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                          {groups.map((g) => (
+                            <label
+                              key={g.key}
+                              className="flex cursor-pointer items-center gap-1 text-xs"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected.includes(g.key)}
+                                onChange={(e) =>
+                                  handleCheckboxChange(
+                                    source,
+                                    f.key,
+                                    g.key,
+                                    e.target.checked,
+                                  )
+                                }
+                                className="h-3.5 w-3.5"
+                              />
+                              {g.label}
+                            </label>
+                          ))}
+                          {checkboxBlocked === f.key && (
+                            <span className="text-xs text-red-500">
+                              至少需勾选一项
+                            </span>
+                          )}
+                        </div>
+                        {f.hint && (
+                          <span className="text-xs text-gray-400">{f.hint}</span>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <label key={f.key} className="block text-xs">
+                      {f.label}
+                      {f.type === "select" ? (
+                        <select
+                          value={src[f.key]}
+                          onChange={(e) =>
+                            updateSourceField(source, f.key, e.target.value)
+                          }
+                          className={inputClass}
+                        >
+                          {(f.options ?? []).map((opt) => (
+                            <option key={opt || "__empty__"} value={opt}>
+                              {opt === "" ? "不限" : opt}
+                            </option>
+                          ))}
+                        </select>
+                      ) : f.type === "number" ? (
+                        <input
+                          type="number"
+                          min={0}
+                          value={src[f.key]}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (v === "" || Number(v) >= 0) {
+                              updateSourceField(source, f.key, v);
+                            }
+                          }}
+                          placeholder={f.placeholder}
+                          className={inputClass}
+                        />
+                      ) : f.type === "seed" ? (
+                        <div className="mt-1 flex gap-1">
+                          <input
+                            value={src[f.key]}
+                            onChange={(e) =>
+                              updateSourceField(source, f.key, e.target.value)
+                            }
+                            placeholder="随机搜索种子（可选）"
+                            className={inputClass}
+                          />
+                          <button
+                            onClick={() => void handleRefreshSeed()}
+                            title="生成新 seed 并自动保存"
+                            className="shrink-0 rounded-md bg-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                            type="button"
+                          >
+                            刷新
+                          </button>
+                        </div>
+                      ) : (
+                        <input
+                          value={src[f.key]}
+                          onChange={(e) =>
+                            updateSourceField(source, f.key, e.target.value)
+                          }
+                          placeholder={f.placeholder}
+                          className={inputClass}
+                        />
+                      )}
+                      {f.hint && (
+                        <span className="text-xs text-gray-400">{f.hint}</span>
+                      )}
+                    </label>
+                  );
+                })}
               </div>
             );
           })()}
