@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::{
     cmux_config_path, ghosty_config_path, read_cmux_config_at, read_config as read_config_impl,
@@ -131,12 +132,51 @@ pub async fn download_wallpaper(item: WallpaperItem) -> Result<String, String> {
     wallpaper::download_wallpaper(item, wallpaper_settings_from_config()).await
 }
 
+#[tauri::command]
+pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|e| format!("cannot resolve app log dir: {e}"))?;
+    tauri_plugin_opener::open_path(dir, None::<&str>)
+        .map_err(|e| format!("cannot open log dir: {e}"))
+}
+
+fn log_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_log_dir()
+        .map_err(|e| format!("cannot resolve app log dir: {e}"))
+}
+
+/// 初始化应用日志：写入平台日志目录的 `workstation.log`（含启动归档与清理），
+/// 同时输出到控制台。文件初始化失败时降级为仅控制台输出，不导致应用崩溃。
+fn init_logging(app: &tauri::App) -> Result<(), String> {
+    crate::logging::init_logging_with_fallbacks(
+        log_dir_path(app.handle()),
+        |dir, level| {
+            crate::logging::init_file_logging(dir, level, |config| {
+                log4rs::init_config(config)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        },
+        |level| {
+            log4rs::init_config(crate::logging::build_console_config(level))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let _ = init_logging(app);
+            app.listen("frontend-log", move |event| {
+                crate::logging::log_frontend_event(event.payload());
+            });
             let cache_dir = app
                 .path()
                 .app_cache_dir()
@@ -195,7 +235,8 @@ pub fn run() {
             write_ghosty_config,
             reload_cmux_config,
             search_wallpapers,
-            download_wallpaper
+            download_wallpaper,
+            open_log_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

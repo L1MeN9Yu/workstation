@@ -27,6 +27,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 futures-util = "0.3"
 bytes = "1"
 log = "0.4"
-env_logger = "0.11"
+log4rs = { version = "1", default-features = false, features = ["file_appender", "console_appender", "pattern_encoder", "chrono"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sha2 = "0.10"
 

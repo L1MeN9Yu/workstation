@@ -7,6 +7,7 @@ use serde::ser::SerializeStruct;
 use serde::Serialize;
 use serde_json::Value;
 
+pub mod logging;
 pub mod runtime;
 pub mod wallpaper;
 
