@@ -126,7 +126,9 @@ describe("WallpaperTool", () => {
       },
     ]);
     await flush();
-    const input = container.querySelector("input")!;
+    const input = Array.from(container.querySelectorAll("input")).find(
+      (i) => i.placeholder === "关键词，如 anime、landscape",
+    )!;
     act(() => {
       const setter = Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
@@ -347,17 +349,17 @@ describe("WallpaperTool", () => {
     expect(container.textContent).toContain("disk full");
   });
 
-  it("saves settings via settings panel", async () => {
+  it("saves global settings via settings panel", async () => {
     await flush();
     const buttons = Array.from(container.querySelectorAll("button"));
     const settingsBtn = buttons.find((b) => b.textContent === "设置")!;
     await act(async () => {
       settingsBtn.click();
     });
+    expect(container.textContent).toContain("统一设置");
     expect(container.textContent).toContain("代理地址");
-    expect(container.textContent).toContain("wallhaven 参数");
+    expect(container.textContent).toContain("下载目录");
     expect(container.textContent).not.toContain("Danbooru 参数");
-    expect(container.textContent).not.toContain("Safebooru 参数");
     const saveBtn = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent === "保存设置",
     )!;
@@ -400,35 +402,36 @@ describe("WallpaperTool", () => {
     expect(container.textContent).toContain("设置已保存");
   });
 
-  it("shows only the selected source settings in panel", async () => {
+  it("exposes the selected source settings outside the settings panel", async () => {
     await flush();
-    const buttons = Array.from(container.querySelectorAll("button"));
-    const danbooruTab = buttons.find((b) => b.textContent === "Danbooru")!;
+    expect(container.textContent).toContain("wallhaven 参数");
+    expect(container.textContent).toContain("API Key");
+    expect(container.textContent).toContain("purity");
+    expect(container.textContent).toContain("categories");
+    expect(container.textContent).toContain("最小宽度");
+    expect(container.textContent).toContain("最小高度");
+    expect(container.textContent).not.toContain("Danbooru 参数");
+    expect(container.textContent).not.toContain("Safebooru 参数");
+
+    const danbooruTab = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Danbooru",
+    )!;
     await act(async () => {
       danbooruTab.click();
     });
-    const settingsBtn = buttons.find((b) => b.textContent === "设置")!;
-    await act(async () => {
-      settingsBtn.click();
-    });
     expect(container.textContent).toContain("Danbooru 参数");
     expect(container.textContent).toContain("用户名");
-    expect(container.textContent).toContain("API Key");
     expect(container.textContent).toContain("rating");
     expect(container.textContent).not.toContain("wallhaven 参数");
-    expect(container.textContent).not.toContain("Safebooru 参数");
     expect(container.textContent).not.toContain("最小高度");
   });
 
-  it("edits per-source field and saves it", async () => {
+  it("edits exposed source settings and saves them via panel", async () => {
     await flush();
-    const buttons = Array.from(container.querySelectorAll("button"));
-    const settingsBtn = buttons.find((b) => b.textContent === "设置")!;
-    await act(async () => {
-      settingsBtn.click();
-    });
     const inputs = Array.from(container.querySelectorAll("input"));
-    const apiKeyInput = inputs.find((i) => i.placeholder.includes("wallhaven 设置页"))!;
+    const apiKeyInput = inputs.find((i) =>
+      i.placeholder.includes("wallhaven 设置页"),
+    )!;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
@@ -436,6 +439,11 @@ describe("WallpaperTool", () => {
       )!.set!;
       setter.call(apiKeyInput, "wh-secret");
       apiKeyInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const settingsBtn = buttons.find((b) => b.textContent === "设置")!;
+    await act(async () => {
+      settingsBtn.click();
     });
     const saveBtn = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent === "保存设置",
