@@ -517,9 +517,7 @@ fn rebuild_thumb_index(dir: &Path) -> ThumbIndex {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
         if name == CACHE_META_FILE {
             continue;
         }
@@ -1424,6 +1422,8 @@ mod tests {
         std::fs::write(dir.join("hash1234567890.verylong"), "x").unwrap();
         std::fs::write(dir.join(CACHE_META_FILE), "{}").unwrap();
         std::fs::create_dir(dir.join("dir.png")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nonexistent-target", dir.join("broken.png")).unwrap();
         std::fs::write(cache_file_path(&dir, "cafe0000000000001", "png"), "abc").unwrap();
         let index = rebuild_thumb_index(&dir);
         assert_eq!(index.len(), 1);
