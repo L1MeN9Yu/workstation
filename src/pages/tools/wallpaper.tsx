@@ -294,6 +294,7 @@ export default function WallpaperTool() {
 
       {showSettings && settings && (
         <div className="mb-3 space-y-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+          <div className="text-sm font-medium">统一设置</div>
           <label className="block text-sm">
             代理地址（留空则直连）
             <input
@@ -316,50 +317,47 @@ export default function WallpaperTool() {
               className={inputClass}
             />
           </label>
-          <div className="space-y-3 border-t border-gray-200 pt-3 dark:border-gray-700">
-            {(() => {
-              const s = getSourceMeta(source);
-              const fields = SOURCE_FIELDS[source] ?? [];
-              const src = settings.sources[source];
-              return (
-                <div key={source}>
-                  <div className="mb-1 text-sm font-medium">
-                    {s?.label ?? source} 参数
-                  </div>
-                  {src && fields.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-2">
-                      {fields.map((f) => (
-                        <label key={f.key} className="block text-xs">
-                          {f.label}
-                          <input
-                            value={src[f.key]}
-                            onChange={(e) =>
-                              updateSourceField(source, f.key, e.target.value)
-                            }
-                            placeholder={f.placeholder}
-                            className={inputClass}
-                          />
-                          {f.hint && (
-                            <span className="text-gray-400">{f.hint}</span>
-                          )}
-                        </label>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-gray-400">
-                      该图源无需额外参数
-                    </p>
-                  )}
-                </div>
-              );
-            })()}
-          </div>
           <button
             onClick={() => void handleSaveSettings()}
             className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white"
           >
             保存设置
           </button>
+        </div>
+      )}
+
+      {settings && meta && (
+        <div className="mb-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+          <div className="mb-2 text-sm font-medium">{meta.label} 参数</div>
+          {(() => {
+            const fields = SOURCE_FIELDS[source] ?? [];
+            const src = settings.sources[source];
+            if (!src || fields.length === 0) {
+              return (
+                <p className="text-xs text-gray-400">该图源无需额外参数</p>
+              );
+            }
+            return (
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {fields.map((f) => (
+                  <label key={f.key} className="block text-xs">
+                    {f.label}
+                    <input
+                      value={src[f.key]}
+                      onChange={(e) =>
+                        updateSourceField(source, f.key, e.target.value)
+                      }
+                      placeholder={f.placeholder}
+                      className={inputClass}
+                    />
+                    {f.hint && (
+                      <span className="text-gray-400">{f.hint}</span>
+                    )}
+                  </label>
+                ))}
+              </div>
+            );
+          })()}
         </div>
       )}
 
