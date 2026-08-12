@@ -1072,7 +1072,6 @@ mod tests {
 
     #[test]
     fn search_wallhaven_omits_empty_ratios() {
-        let server = MockServer::ok(r#"{"data":[]}"#);
         let client = build_client(None).unwrap();
         let query = SearchQuery {
             source: "wallhaven".to_string(),

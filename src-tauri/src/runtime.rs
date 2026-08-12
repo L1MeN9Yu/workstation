@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
@@ -133,9 +134,38 @@ pub async fn download_wallpaper(item: WallpaperItem) -> Result<String, String> {
 
 #[tauri::command]
 pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
-    let dir = crate::logging::log_dir(&app)?;
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|e| format!("cannot resolve app log dir: {e}"))?;
     tauri_plugin_opener::open_path(dir, None::<&str>)
         .map_err(|e| format!("cannot open log dir: {e}"))
+}
+
+fn log_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_log_dir()
+        .map_err(|e| format!("cannot resolve app log dir: {e}"))
+}
+
+/// 初始化应用日志：写入平台日志目录的 `workstation.log`（含启动归档与清理），
+/// 同时输出到控制台。文件初始化失败时降级为仅控制台输出，不导致应用崩溃。
+fn init_logging(app: &tauri::App) -> Result<(), String> {
+    crate::logging::init_logging_with_fallbacks(
+        log_dir_path(app.handle()),
+        |dir, level| {
+            crate::logging::init_file_logging(dir, level, |config| {
+                log4rs::init_config(config)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        },
+        |level| {
+            log4rs::init_config(crate::logging::build_console_config(level))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -143,7 +173,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let _ = crate::logging::init_logging(app);
+            let _ = init_logging(app);
             app.listen("frontend-log", move |event| {
                 crate::logging::log_frontend_event(event.payload());
             });

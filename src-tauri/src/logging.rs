@@ -8,7 +8,6 @@ use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Logger, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use serde::Deserialize;
-use tauri::Manager;
 
 /// 当前会话固定写入的日志文件名。
 pub const SESSION_LOG_FILE: &str = "workstation.log";
@@ -22,12 +21,6 @@ pub fn session_log_path(dir: &Path) -> PathBuf {
     dir.join(SESSION_LOG_FILE)
 }
 
-pub fn log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_log_dir()
-        .map_err(|e| format!("cannot resolve app log dir: {e}"))
-}
-
 fn startup_timestamp() -> String {
     Local::now().format("%Y%m%d-%H%M%S%.3f").to_string()
 }
@@ -35,15 +28,18 @@ fn startup_timestamp() -> String {
 /// 归档上一会话的 `workstation.log` 为 `workstation-<启动时间戳>.log`。
 /// 当前会话文件不存在时返回 `Ok(None)`；归档名冲突时追加进程号避免覆盖。
 pub fn archive_previous_session(dir: &Path) -> Result<Option<PathBuf>, String> {
+    archive_previous_session_at(dir, &startup_timestamp())
+}
+
+fn archive_previous_session_at(dir: &Path, timestamp: &str) -> Result<Option<PathBuf>, String> {
     let current = session_log_path(dir);
     if !current.exists() {
         return Ok(None);
     }
-    let mut archived = dir.join(format!("workstation-{}.log", startup_timestamp()));
+    let mut archived = dir.join(format!("workstation-{timestamp}.log"));
     if archived.exists() {
         archived = dir.join(format!(
-            "workstation-{}-{}.log",
-            startup_timestamp(),
+            "workstation-{timestamp}-{}.log",
             std::process::id()
         ));
     }
@@ -127,45 +123,51 @@ fn build_config(dir: &Path, level: LevelFilter) -> Result<Config, String> {
         .map_err(|e| format!("cannot build log4rs config: {e}"))
 }
 
-fn init_console_only(level: LevelFilter) -> Result<(), String> {
-    let console = ConsoleAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(CONSOLE_PATTERN)))
-        .build();
-    let config = Config::builder()
-        .appender(Appender::builder().build("console", Box::new(console)))
-        .build(Root::builder().appender("console").build(level))
-        .map_err(|e| format!("cannot build console-only log4rs config: {e}"))?;
-    log4rs::init_config(config)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-/// 初始化应用日志：写入平台日志目录的 `workstation.log`（含启动归档与清理），
-/// 同时输出到控制台。文件初始化失败时降级为仅控制台输出，不导致应用崩溃。
-pub fn init_logging(app: &tauri::App) -> Result<(), String> {
-    match app.path().app_log_dir() {
-        Ok(dir) => match init_file_logging(&dir) {
+/// 带降级的日志初始化编排：目录可解析且文件日志初始化成功 → `Ok`；
+/// 否则降级为 console-init。两级失败路径与成功路径均由测试覆盖，
+/// tauri 壳（`init_logging`）位于 `runtime.rs`（CI 覆盖率忽略该文件）。
+pub fn init_logging_with_fallbacks(
+    log_dir_result: Result<PathBuf, String>,
+    file_init: impl FnOnce(&Path, LevelFilter) -> Result<(), String>,
+    console_init: impl FnOnce(LevelFilter) -> Result<(), String>,
+) -> Result<(), String> {
+    match log_dir_result {
+        Ok(dir) => match file_init(&dir, level_filter()) {
             Ok(()) => Ok(()),
             Err(e) => {
                 eprintln!("[logging] file logging unavailable ({e}), falling back to console");
-                init_console_only(level_filter())
+                console_init(level_filter())
             }
         },
         Err(e) => {
             eprintln!("[logging] cannot resolve app log dir ({e}), falling back to console");
-            init_console_only(level_filter())
+            console_init(level_filter())
         }
     }
 }
 
-fn init_file_logging(dir: &Path) -> Result<(), String> {
+/// 文件日志初始化：创建目录 → 归档上一会话 → 清理过期归档 → 构建配置并初始化。
+/// 初始化动作通过 `init` 注入，便于单元测试覆盖全部路径。
+pub fn init_file_logging(
+    dir: &Path,
+    level: LevelFilter,
+    init: impl FnOnce(Config) -> Result<(), String>,
+) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create log dir {}: {e}", dir.display()))?;
     let _ = archive_previous_session(dir);
     let _ = prune_archives(dir, MAX_ARCHIVES);
-    let config = build_config(dir, level_filter())?;
-    log4rs::init_config(config)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let config = build_config(dir, level)?;
+    init(config)
+}
+
+pub fn build_console_config(level: LevelFilter) -> Config {
+    let console = ConsoleAppender::builder()
+        .encoder(Box::new(PatternEncoder::new(CONSOLE_PATTERN)))
+        .build();
+    Config::builder()
+        .appender(Appender::builder().build("console", Box::new(console)))
+        .build(Root::builder().appender("console").build(level))
+        .expect("console-only config is statically valid")
 }
 
 /// 前端通过 `frontend-log` 事件上报的日志载荷。
@@ -270,6 +272,38 @@ mod tests {
     }
 
     #[test]
+    fn archive_previous_session_at_appends_pid_on_ts_collision() {
+        let dir = temp_dir("archive-at-collision");
+        fs::write(session_log_path(&dir), "a").unwrap();
+        let first = dir.join("workstation-20260812-120000.000.log");
+        fs::write(&first, "old").unwrap();
+        let archived = archive_previous_session_at(&dir, "20260812-120000.000")
+            .unwrap()
+            .expect("archived");
+        assert_ne!(archived, first);
+        let name = archived.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("workstation-20260812-120000.000-"));
+    }
+
+    #[test]
+    fn archive_previous_session_at_errors_when_rename_fails() {
+        let dir = temp_dir("archive-at-err");
+        fs::write(session_log_path(&dir), "a").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+            let err = archive_previous_session_at(&dir, "20260812-120000.000").unwrap_err();
+            assert!(err.contains("cannot archive previous session log"));
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = archive_previous_session_at(&dir, "20260812-120000.000");
+        }
+    }
+
+    #[test]
     fn prune_archives_removes_oldest_beyond_max() {
         let dir = temp_dir("prune");
         for i in 0..12 {
@@ -301,6 +335,21 @@ mod tests {
         let deleted = prune_archives(&dir, 0).unwrap();
         assert_eq!(deleted, 0);
         assert!(session_log_path(&dir).exists());
+    }
+
+    #[test]
+    fn prune_archives_warns_and_keeps_undelatable_entry() {
+        let dir = temp_dir("prune-undel");
+        // 同名"目录"无法 remove_file，触发 warn 分支且不计入删除数
+        let stubborn = dir.join("workstation-20260801-00.log");
+        fs::create_dir_all(&stubborn).unwrap();
+        let regular = dir.join("workstation-20260801-01.log");
+        fs::write(&regular, "x").unwrap();
+        // 最旧的（stubborn 目录）删除失败 → 计入 warn，不增加 deleted 计数
+        let deleted = prune_archives(&dir, 1).unwrap();
+        assert_eq!(deleted, 0);
+        assert!(stubborn.exists(), "undelatable entry should remain");
+        assert!(regular.exists());
     }
 
     #[test]
@@ -378,5 +427,122 @@ mod tests {
             frontend_record(r#"{"level":"warn","message":"hi","source":"other"}"#).expect("parsed");
         assert_eq!(level, Level::Warn);
         assert_eq!(message, "hi");
+    }
+
+    #[test]
+    fn log_frontend_event_accepts_valid_payload() {
+        // 无全局 logger 时 log() 为 no-op，调用不应 panic 或产生副作用
+        log_frontend_event(r#"{"level":"error","message":"boom"}"#);
+    }
+
+    #[test]
+    fn log_frontend_event_accepts_invalid_payload() {
+        log_frontend_event("not json");
+    }
+
+    #[test]
+    fn init_file_logging_archives_previous_session_first() {
+        let dir = temp_dir("init-archive");
+        fs::write(session_log_path(&dir), "old").unwrap();
+        let mut inits = 0;
+        init_file_logging(&dir, LevelFilter::Info, |_| {
+            inits += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(inits, 1);
+        // 旧会话内容已归档（FileAppender 构建时会重新创建当前文件）
+        let archives: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("workstation-") && n.ends_with(".log"))
+            .collect();
+        assert_eq!(archives.len(), 1);
+        let archived = dir.join(&archives[0]);
+        assert_eq!(fs::read_to_string(&archived).unwrap(), "old");
+    }
+
+    #[test]
+    fn init_file_logging_propagates_init_error() {
+        let dir = temp_dir("init-err");
+        let err = init_file_logging(&dir, LevelFilter::Info, |_| Err("init boom".to_string()))
+            .unwrap_err();
+        assert_eq!(err, "init boom");
+    }
+
+    #[test]
+    fn init_file_logging_propagates_create_dir_error() {
+        let dir = temp_dir("init-nodir");
+        let blocker = dir.join("blocker");
+        fs::write(&blocker, "file not dir").unwrap();
+        let err =
+            init_file_logging(&blocker.join("nested"), LevelFilter::Info, |_| Ok(())).unwrap_err();
+        assert!(err.contains("cannot create log dir"));
+    }
+
+    #[test]
+    fn init_console_config_builds_console_appender() {
+        let config = build_console_config(LevelFilter::Debug);
+        assert!(config.appenders().iter().any(|a| a.name() == "console"));
+    }
+
+    #[test]
+    fn init_logging_with_falls_back_to_console_when_file_init_fails() {
+        let dir = temp_dir("init-fallback-file");
+        let blocker = dir.join("blocker");
+        fs::write(&blocker, "x").unwrap();
+        let mut console_level = None;
+        let result = init_logging_with_fallbacks(
+            Ok(blocker.join("nested")),
+            |_dir, _level| Err("file boom".to_string()),
+            |level| {
+                console_level = Some(level);
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(console_level, Some(LevelFilter::Info));
+    }
+
+    fn ok_file_init(_dir: &Path, _level: LevelFilter) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn ok_console_init(_level: LevelFilter) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[test]
+    fn ok_console_init_succeeds() {
+        assert!(ok_console_init(LevelFilter::Info).is_ok());
+    }
+
+    #[test]
+    fn init_logging_with_falls_back_to_console_when_dir_resolution_fails() {
+        let mut console_called = false;
+        let result =
+            init_logging_with_fallbacks(Err("no log dir".to_string()), ok_file_init, |_| {
+                console_called = true;
+                Ok(())
+            });
+        assert!(result.is_ok());
+        assert!(console_called);
+    }
+
+    #[test]
+    fn init_logging_with_propagates_console_init_error() {
+        let result =
+            init_logging_with_fallbacks(Err("no log dir".to_string()), ok_file_init, |_| {
+                Err("console boom".to_string())
+            });
+        assert_eq!(result.unwrap_err(), "console boom");
+    }
+
+    #[test]
+    fn init_logging_with_ok_dir_uses_file_path_when_file_init_succeeds() {
+        let dir = temp_dir("init-ok-logging");
+        let result = init_logging_with_fallbacks(Ok(dir.clone()), ok_file_init, ok_console_init);
+        assert!(result.is_ok());
     }
 }
