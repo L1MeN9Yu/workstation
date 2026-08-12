@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ToolPage } from "../ToolPage";
 import {
   BIT_GROUPS,
+  RATIO_OPTIONS,
   applyWallpaperToGhosty,
   bitsToSelections,
   downloadWallpaper,
@@ -145,7 +146,7 @@ function ProxiedThumb({ hash, alt, className }: ProxiedThumbProps) {
   );
 }
 
-type FieldType = "text" | "checkbox" | "select" | "number" | "seed";
+type FieldType = "text" | "checkbox" | "select" | "number" | "seed" | "multiselect";
 
 interface SourceFieldDef {
   key: keyof SourceSettings;
@@ -179,18 +180,18 @@ const SOURCE_FIELDS: Record<string, SourceFieldDef[]> = {
       groups: ["General", "Anime", "People"],
       hint: "至少勾选一项",
     },
-    { key: "minWidth", label: "最小宽度", type: "number", placeholder: "1920" },
-    {
-      key: "minHeight",
-      label: "最小高度",
-      type: "number",
-      placeholder: "1080",
-    },
     {
       key: "seed",
       label: "seed",
       type: "seed",
       hint: "随机搜索的种子，点击刷新可换一批结果",
+    },
+    {
+      key: "ratios",
+      label: "ratios",
+      type: "multiselect",
+      options: RATIO_OPTIONS,
+      hint: "宽高比筛选，可多选",
     },
   ],
   danbooru: [
@@ -539,6 +540,45 @@ export default function WallpaperTool() {
                               至少需勾选一项
                             </span>
                           )}
+                        </div>
+                        {f.hint && (
+                          <span className="text-xs text-gray-400">{f.hint}</span>
+                        )}
+                      </div>
+                    );
+                  }
+                  if (f.type === "multiselect") {
+                    const options = f.options ?? [];
+                    const selected = (src[f.key] ?? "")
+                      .split(",")
+                      .map((v) => v.trim())
+                      .filter((v) => v !== "");
+                    return (
+                      <div
+                        key={f.key}
+                        className="col-span-2 sm:col-span-3"
+                      >
+                        <span className="block text-xs">{f.label}</span>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-gray-300 bg-gray-50 px-2 py-1 dark:border-gray-600 dark:bg-gray-900">
+                          {options.map((opt) => (
+                            <label
+                              key={opt}
+                              className="flex cursor-pointer items-center gap-1 text-xs"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected.includes(opt)}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...selected, opt]
+                                    : selected.filter((v) => v !== opt);
+                                  updateSourceField(source, f.key, next.join(","));
+                                }}
+                                className="h-3.5 w-3.5"
+                              />
+                              {opt}
+                            </label>
+                          ))}
                         </div>
                         {f.hint && (
                           <span className="text-xs text-gray-400">{f.hint}</span>

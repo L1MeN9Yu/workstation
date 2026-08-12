@@ -4,6 +4,7 @@ import {
   BIT_GROUPS,
   DEFAULT_SOURCE_SETTINGS,
   DEFAULT_WALLPAPER_SETTINGS,
+  RATIO_OPTIONS,
   applyWallpaperToGhosty,
   bitsToSelections,
   downloadWallpaper,
@@ -83,6 +84,7 @@ describe("wallpaper", () => {
           minHeight: "1080",
           rating: "safe",
           seed: "",
+          ratios: "",
         },
       },
     };
@@ -152,7 +154,12 @@ describe("wallpaper", () => {
       if (key === "wallpaperSources") {
         return {
           sources: {
-            wallhaven: { apiKey: "wh-key", purity: "110", seed: "custom-seed" },
+            wallhaven: {
+              apiKey: "wh-key",
+              purity: "110",
+              seed: "custom-seed",
+              ratios: "16x9,21x9",
+            },
           },
         };
       }
@@ -162,9 +169,33 @@ describe("wallpaper", () => {
     expect(settings.sources.wallhaven.apiKey).toBe("wh-key");
     expect(settings.sources.wallhaven.purity).toBe("110");
     expect(settings.sources.wallhaven.seed).toBe("custom-seed");
+    expect(settings.sources.wallhaven.ratios).toBe("16x9,21x9");
     expect(settings.sources.wallhaven.categories).toBe("010");
     expect(settings.sources.danbooru.apiKey).toBe("");
     expect(settings.sources.safebooru.minHeight).toBe("");
+  });
+
+  it("loadWallpaperSettings fills default ratios for legacy sources without it", async () => {
+    mockedInvoke.mockResolvedValue(null);
+    vi.mocked(readConfig).mockImplementation(async (key: string) => {
+      if (key === "wallpaperSources") {
+        return { sources: { wallhaven: { apiKey: "wh-key" } } };
+      }
+      return null;
+    });
+    const settings = await loadWallpaperSettings();
+    expect(settings.sources.wallhaven.apiKey).toBe("wh-key");
+    expect(settings.sources.wallhaven.ratios).toBe("");
+  });
+
+  it("RATIO_OPTIONS exposes common wallhaven ratios", () => {
+    expect(RATIO_OPTIONS).toContain("16x9");
+    expect(RATIO_OPTIONS).toContain("21x9");
+    expect(RATIO_OPTIONS).toContain("9x16");
+  });
+
+  it("default ratios is an empty string", () => {
+    expect(DEFAULT_SOURCE_SETTINGS.ratios).toBe("");
   });
 
   it("loadWallpaperSettings falls back to legacy wallpaper.sources", async () => {

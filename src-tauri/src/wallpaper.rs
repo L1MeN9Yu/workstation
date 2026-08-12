@@ -11,7 +11,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 const USER_AGENT: &str = "workstation-wallpaper/0.1";
 const DEFAULT_MIN_WIDTH: u32 = 1920;
-const DEFAULT_MIN_HEIGHT: u32 = 1080;
 const CACHE_META_FILE: &str = "cache_meta.json";
 const MAX_CACHE_BYTES: u64 = 20_000_000_000; // 20GB（十进制）
 
@@ -73,6 +72,7 @@ pub struct SourceSettings {
     pub min_height: Option<u32>,
     pub rating: Option<String>,
     pub seed: Option<String>,
+    pub ratios: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -165,15 +165,12 @@ async fn search_wallhaven(
     src: &SourceSettings,
     base_url: &str,
 ) -> Result<Vec<WallpaperItem>, String> {
-    let min_width = src.min_width.unwrap_or(DEFAULT_MIN_WIDTH);
-    let min_height = src.min_height.unwrap_or(DEFAULT_MIN_HEIGHT);
     let mut url =
         reqwest::Url::parse(&format!("{base_url}/api/v1/search")).map_err(|e| e.to_string())?;
     {
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("categories", src.categories.as_deref().unwrap_or("010"));
         pairs.append_pair("purity", src.purity.as_deref().unwrap_or("100"));
-        pairs.append_pair("atleast", &format!("{min_width}x{min_height}"));
         if query.page > 1 {
             pairs.append_pair("page", &query.page.to_string());
         }
@@ -186,6 +183,16 @@ async fn search_wallhaven(
             if let Some(seed) = src.seed.as_deref().filter(|s| !s.trim().is_empty()) {
                 pairs.append_pair("seed", seed.trim());
             }
+        }
+        for r in src
+            .ratios
+            .as_deref()
+            .into_iter()
+            .flat_map(|s| s.split(','))
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+        {
+            pairs.append_pair("ratios", r);
         }
         let kw = query.keywords.trim();
         if !kw.is_empty() {
@@ -207,7 +214,6 @@ async fn search_wallhaven(
     Ok(body
         .data
         .into_iter()
-        .filter(|it| it.dimension_x >= min_width && it.dimension_y >= min_height)
         .map(|it| {
             let thumb_url = it.thumbs.small;
             let thumb_hash = thumb_hash(&thumb_url);
@@ -914,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn search_wallhaven_parses_and_filters() {
+    fn search_wallhaven_parses_all_items_without_resolution_filter() {
         let server = MockServer::new(vec![(
             200,
             r#"{"data":[{"id":"a1","path":"https://img/full1.jpg","thumbs":{"small":"https://t/1.jpg"},"dimension_x":2560,"dimension_y":1440},{"id":"a2","path":"https://img/full2.jpg","thumbs":{"small":"https://t/2.jpg"},"dimension_x":1280,"dimension_y":720}]}"#,
@@ -936,6 +942,7 @@ mod tests {
             rating: None,
             login: None,
             seed: None,
+            ratios: None,
         };
         let items = tauri::async_runtime::block_on(search_wallhaven(
             &client,
@@ -944,12 +951,36 @@ mod tests {
             &server.base_url(),
         ))
         .unwrap();
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0].id, "wallhaven-a1");
         assert_eq!(items[0].source, "wallhaven");
         assert_eq!(items[0].thumb_url, "https://t/1.jpg");
         assert_eq!(items[0].width, 2560);
+        assert_eq!(items[1].id, "wallhaven-a2");
+        assert_eq!(items[1].width, 1280);
         assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn search_wallhaven_omits_atleast_param() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+            ..Default::default()
+        };
+        let src = SourceSettings {
+            min_width: Some(1920),
+            min_height: Some(1080),
+            ..SourceSettings::default()
+        };
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains("atleast="), "got: {}", lines[0]);
     }
 
     #[test]
@@ -1014,6 +1045,80 @@ mod tests {
         let lines = server.request_lines();
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].contains("seed="), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn search_wallhaven_sends_ratios_multi_values() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+            ..Default::default()
+        };
+        let src = SourceSettings {
+            ratios: Some("16x9, 21x9, 32x9".to_string()),
+            ..SourceSettings::default()
+        };
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("ratios=16x9"), "got: {}", lines[0]);
+        assert!(lines[0].contains("ratios=21x9"), "got: {}", lines[0]);
+        assert!(lines[0].contains("ratios=32x9"), "got: {}", lines[0]);
+    }
+
+    #[test]
+    fn search_wallhaven_omits_empty_ratios() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+            ..Default::default()
+        };
+        for ratios in [None, Some(String::new()), Some(" , , ".to_string())] {
+            let server = MockServer::ok(r#"{"data":[]}"#);
+            let src = SourceSettings {
+                ratios,
+                ..SourceSettings::default()
+            };
+            tauri::async_runtime::block_on(search_wallhaven(
+                &client,
+                &query,
+                &src,
+                &server.base_url(),
+            ))
+            .unwrap();
+            let lines = server.request_lines();
+            assert_eq!(lines.len(), 1);
+            assert!(!lines[0].contains("ratios="), "got: {}", lines[0]);
+        }
+    }
+
+    #[test]
+    fn search_wallhaven_random_keeps_ratios() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: true,
+            ..Default::default()
+        };
+        let src = SourceSettings {
+            ratios: Some("16x9".to_string()),
+            ..SourceSettings::default()
+        };
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("sorting=random"), "got: {}", lines[0]);
+        assert!(lines[0].contains("ratios=16x9"), "got: {}", lines[0]);
     }
 
     #[test]
