@@ -5,19 +5,29 @@ import WallpaperTool from "./wallpaper";
 import {
   applyWallpaperToGhosty,
   downloadWallpaper,
-  fetchWallpaperThumb,
   loadWallpaperSettings,
   saveWallpaperSettings,
   searchWallpapers,
 } from "../../lib/wallpaper";
 
+const { readyCallbackRef } = vi.hoisted(() => ({
+  readyCallbackRef: { current: () => {} },
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn((_event: string, cb: () => void) => {
+    readyCallbackRef.current = cb;
+    return Promise.resolve(() => {});
+  }),
+}));
+
 vi.mock("../../lib/wallpaper", () => ({
   applyWallpaperToGhosty: vi.fn(),
   downloadWallpaper: vi.fn(),
-  fetchWallpaperThumb: vi.fn(),
   loadWallpaperSettings: vi.fn(),
   saveWallpaperSettings: vi.fn(),
   searchWallpapers: vi.fn(),
+  thumbUrl: (hash: string) => `thumb://${hash}`,
 }));
 
 function setup(container: HTMLElement): Root {
@@ -74,7 +84,6 @@ describe("WallpaperTool", () => {
       },
     });
     vi.mocked(searchWallpapers).mockResolvedValue([]);
-    vi.mocked(fetchWallpaperThumb).mockResolvedValue("data:image/jpeg;base64,AAAA");
     container = document.createElement("div");
     document.body.appendChild(container);
     root = setup(container);
@@ -120,6 +129,7 @@ describe("WallpaperTool", () => {
         id: "wallhaven-abc",
         source: "wallhaven",
         thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "aaaaaaaaaaaaaaaa",
         full_url: "https://full.example/a.jpg",
         width: 1920,
         height: 1080,
@@ -151,12 +161,13 @@ describe("WallpaperTool", () => {
     expect(container.textContent).toContain("1920×1080");
   });
 
-  it("shows thumb via proxied fetch and renders failure fallback", async () => {
+  it("renders thumb via protocol url", async () => {
     vi.mocked(searchWallpapers).mockResolvedValue([
       {
         id: "wallhaven-abc",
         source: "wallhaven",
         thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "0123456789abcdef",
         full_url: "https://full.example/a.jpg",
         width: 1920,
         height: 1080,
@@ -170,26 +181,121 @@ describe("WallpaperTool", () => {
       searchBtn.click();
     });
     const img = container.querySelector("img");
-    expect(img?.getAttribute("src")).toBe("data:image/jpeg;base64,AAAA");
+    expect(img?.getAttribute("src")).toBe("thumb://0123456789abcdef");
+  });
 
-    vi.mocked(fetchWallpaperThumb).mockRejectedValue(new Error("proxy down"));
+  it("shows skeleton placeholder until thumb image loads", async () => {
     vi.mocked(searchWallpapers).mockResolvedValue([
       {
-        id: "wallhaven-xyz",
+        id: "wallhaven-abc",
         source: "wallhaven",
-        thumb_url: "https://thumb.example/x.jpg",
-        full_url: "https://full.example/x.jpg",
-        width: 2560,
-        height: 1440,
+        thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "0123456789abcdef",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
       },
     ]);
+    await flush();
+    const searchBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "搜索",
+    )!;
     await act(async () => {
       searchBtn.click();
     });
-    await act(async () => {
-      await Promise.resolve();
+    const img = container.querySelector("img")!;
+    expect(container.querySelector('div[role="status"]')).not.toBeNull();
+    expect(img.className).toContain("opacity-0");
+    act(() => {
+      img.dispatchEvent(new Event("load"));
     });
-    expect(container.textContent).toContain("加载失败");
+    expect(container.querySelector('div[role="status"]')).toBeNull();
+    expect(img.className).toContain("opacity-100");
+  });
+
+  it("refreshes thumbs when thumb-ready event fires", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-abc",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "0123456789abcdef",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    await flush();
+    const searchBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "搜索",
+    )!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "thumb://0123456789abcdef",
+    );
+    act(() => {
+      readyCallbackRef.current();
+    });
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "thumb://0123456789abcdef?r=0&v=1",
+    );
+  });
+
+  it("shows failure placeholder after retries exhausted and supports manual retry", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(searchWallpapers).mockResolvedValue([
+        {
+          id: "wallhaven-xyz",
+          source: "wallhaven",
+          thumb_url: "https://thumb.example/x.jpg",
+          thumb_hash: "fedcba9876543210",
+          full_url: "https://full.example/x.jpg",
+          width: 2560,
+          height: 1440,
+        },
+      ]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      let img = container.querySelector("img")!;
+      for (let i = 1; i <= 6; i += 1) {
+        act(() => {
+          img.dispatchEvent(new Event("error"));
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+        img = container.querySelector("img")!;
+        expect(img.getAttribute("src")).toContain(`?r=${i}`);
+      }
+      act(() => {
+        img.dispatchEvent(new Event("error"));
+      });
+      expect(container.textContent).toContain("加载失败，点击重试");
+
+      const retryBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "加载失败，点击重试",
+      )!;
+      act(() => {
+        retryBtn.click();
+      });
+      const img2 = container.querySelector("img");
+      expect(img2).not.toBeNull();
+      expect(img2?.getAttribute("src")).toContain("thumb://fedcba9876543210");
+      act(() => {
+        img2?.dispatchEvent(new Event("load"));
+      });
+      expect(container.textContent).not.toContain("加载失败，点击重试");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("random button passes empty keywords with random true", async () => {
@@ -237,6 +343,7 @@ describe("WallpaperTool", () => {
         id: "wallhaven-a",
         source: "wallhaven",
         thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "bbbbbbbbbbbbbbbb",
         full_url: "https://full.example/a.jpg",
         width: 1920,
         height: 1080,
@@ -247,6 +354,7 @@ describe("WallpaperTool", () => {
         id: "wallhaven-b",
         source: "wallhaven",
         thumb_url: "https://thumb.example/b.jpg",
+        thumb_hash: "cccccccccccccccc",
         full_url: "https://full.example/b.jpg",
         width: 1920,
         height: 1080,
@@ -281,9 +389,7 @@ describe("WallpaperTool", () => {
     });
     const imgs = container.querySelectorAll("img");
     expect(imgs.length).toBe(2);
-    expect(imgs[0].getAttribute("src")).toBe(
-      "data:image/jpeg;base64,AAAA",
-    );
+    expect(imgs[0].getAttribute("src")).toContain("thumb://bbbbbbbbbbbbbbbb");
   });
 
   it("downloads and applies wallpaper on button click", async () => {
@@ -292,6 +398,7 @@ describe("WallpaperTool", () => {
         id: "wallhaven-abc",
         source: "wallhaven",
         thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "dddddddddddddddd",
         full_url: "https://full.example/a.jpg",
         width: 1920,
         height: 1080,
@@ -327,6 +434,7 @@ describe("WallpaperTool", () => {
         id: "danbooru-1",
         source: "danbooru",
         thumb_url: "https://t/a.jpg",
+        thumb_hash: "eeeeeeeeeeeeeeee",
         full_url: "https://f/a.jpg",
         width: 1920,
         height: 1080,

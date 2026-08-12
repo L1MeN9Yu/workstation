@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useSyncExternalStore, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ToolPage } from "../ToolPage";
 import {
   applyWallpaperToGhosty,
   downloadWallpaper,
-  fetchWallpaperThumb,
   loadWallpaperSettings,
   saveWallpaperSettings,
   searchWallpapers,
+  thumbUrl,
   type SourceSettings,
   type WallpaperItem,
   type WallpaperSettings,
@@ -21,74 +22,121 @@ interface SearchError {
   message: string;
 }
 
-const thumbCache = new Map<string, string>();
-const thumbFailed = new Set<string>();
-const thumbPending = new Set<string>();
-const thumbListeners = new Set<() => void>();
-let thumbVersion = 0;
+const MAX_THUMB_ATTEMPTS = 6;
+const THUMB_RETRY_MS = 1000;
 
-function notifyThumb(): void {
-  thumbVersion += 1;
-  for (const listener of thumbListeners) listener();
-}
+const thumbReadyListeners = new Set<() => void>();
+let thumbReadyVersion = 0;
 
-function subscribeThumb(listener: () => void): () => void {
-  thumbListeners.add(listener);
+function subscribeThumbReady(listener: () => void): () => void {
+  thumbReadyListeners.add(listener);
   return () => {
-    thumbListeners.delete(listener);
+    thumbReadyListeners.delete(listener);
   };
 }
 
-function getThumbVersion(): number {
-  return thumbVersion;
+function getThumbReadyVersion(): number {
+  return thumbReadyVersion;
 }
 
-function ensureThumb(url: string): void {
-  if (thumbCache.has(url) || thumbFailed.has(url) || thumbPending.has(url)) {
-    return;
-  }
-  thumbPending.add(url);
-  fetchWallpaperThumb(url)
-    .then((result) => {
-      thumbCache.set(url, result);
-    })
-    .catch(() => {
-      thumbFailed.add(url);
-    })
-    .finally(() => {
-      thumbPending.delete(url);
-      notifyThumb();
-    });
-}
+void listen("thumb-ready", () => {
+  thumbReadyVersion += 1;
+  for (const listener of thumbReadyListeners) listener();
+}).catch(() => {
+  // 非 Tauri 环境（测试）下静默忽略
+});
 
 interface ProxiedThumbProps {
-  url: string;
+  hash: string;
   alt: string;
   className: string;
 }
 
-function ProxiedThumb({ url, alt, className }: ProxiedThumbProps) {
-  useSyncExternalStore(subscribeThumb, getThumbVersion, getThumbVersion);
-  useEffect(() => {
-    ensureThumb(url);
-  }, [url]);
+interface ThumbImageProps {
+  src: string;
+  alt: string;
+  onFailed: () => void;
+}
 
-  if (thumbFailed.has(url)) {
+function ThumbImage({ src, alt, onFailed }: ThumbImageProps) {
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <>
+      {!loaded && (
+        <div
+          className="absolute inset-0 animate-pulse bg-gradient-to-br from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-800 dark:to-gray-700"
+          role="status"
+          aria-label="加载中"
+        />
+      )}
+      <img
+        src={src}
+        alt={alt}
+        className={`relative h-full w-full object-cover transition-opacity duration-200 ${
+          loaded ? "opacity-100" : "opacity-0"
+        }`}
+        onLoad={() => setLoaded(true)}
+        onError={onFailed}
+      />
+    </>
+  );
+}
+
+function ProxiedThumb({ hash, alt, className }: ProxiedThumbProps) {
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const retryTimer = useRef<number | null>(null);
+  const readyVersion = useSyncExternalStore(
+    subscribeThumbReady,
+    getThumbReadyVersion,
+    getThumbReadyVersion,
+  );
+
+  useEffect(() => {
+    return () => {
+      if (retryTimer.current !== null) {
+        window.clearTimeout(retryTimer.current);
+      }
+    };
+  }, []);
+
+  if (failed) {
     return (
-      <div className={`flex items-center justify-center bg-gray-100 text-xs text-gray-400 dark:bg-gray-800 ${className}`}>
-        加载失败
-      </div>
+      <button
+        onClick={() => {
+          setFailed(false);
+          setAttempt((a) => a + 1);
+        }}
+        className={`flex w-full cursor-pointer items-center justify-center bg-gray-100 text-xs text-gray-400 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 ${className}`}
+        type="button"
+      >
+        加载失败，点击重试
+      </button>
     );
   }
-  const dataUrl = thumbCache.get(url);
-  if (!dataUrl) {
-    return (
-      <div className={`flex items-center justify-center bg-gray-100 text-xs text-gray-400 dark:bg-gray-800 ${className}`}>
-        加载中...
-      </div>
-    );
-  }
-  return <img src={dataUrl} alt={alt} className={className} />;
+  const bust =
+    attempt > 0 || readyVersion > 0
+      ? `?r=${attempt}&v=${readyVersion}`
+      : "";
+  return (
+    <div className={`relative overflow-hidden ${className}`}>
+      <ThumbImage
+        key={bust}
+        src={thumbUrl(hash) + bust}
+        alt={alt}
+        onFailed={() => {
+          if (attempt >= MAX_THUMB_ATTEMPTS) {
+            setFailed(true);
+            return;
+          }
+          retryTimer.current = window.setTimeout(() => {
+            retryTimer.current = null;
+            setAttempt((a) => a + 1);
+          }, THUMB_RETRY_MS);
+        }}
+      />
+    </div>
+  );
 }
 
 interface SourceFieldDef {
@@ -416,9 +464,9 @@ export default function WallpaperTool() {
               className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <ProxiedThumb
-                url={item.thumb_url}
+                hash={item.thumb_hash}
                 alt={item.id}
-                className="h-32 w-full object-cover"
+                className="h-32 w-full"
               />
               <div className="flex items-center justify-between p-2 text-xs">
                 <span className="text-gray-500">

@@ -12,6 +12,13 @@ describe("toolsRegistry", () => {
     expect(typeof base64?.component).toBe("function");
   });
 
+  it("orders wallpaper tool before base64 tool", () => {
+    const wallpaperIdx = toolRegistry.findIndex((t) => t.id === "wallpaper");
+    const base64Idx = toolRegistry.findIndex((t) => t.id === "base64");
+    expect(wallpaperIdx).toBeGreaterThanOrEqual(0);
+    expect(base64Idx).toBeGreaterThan(wallpaperIdx);
+  });
+
   it("registerTool appends a new unique entry", () => {
     const entry: ToolEntry = {
       id: "hash",

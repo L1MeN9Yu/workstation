@@ -5237,7 +5237,6 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "workstation"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "dirs 5.0.1",
  "env_logger",
@@ -5246,6 +5245,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
