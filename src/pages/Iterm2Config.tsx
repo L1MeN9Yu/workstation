@@ -16,6 +16,24 @@ export default function Iterm2Config() {
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+
+  // 保存成功提示展示一段时间后自动消失（外部修改导致表单重挂载后提示由父层保留）。
+  useEffect(() => {
+    if (!savedMessage) return;
+    const timer = setTimeout(() => setSavedMessage(null), 4000);
+    return () => clearTimeout(timer);
+  }, [savedMessage]);
+
+  async function refresh() {
+    try {
+      const list = await listIterm2Profiles();
+      setProfiles(list);
+      setSelected((cur) => (cur ? list.find((p) => p.name === cur.name) ?? null : null));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -34,16 +52,6 @@ export default function Iterm2Config() {
       cancelled = true;
     };
   }, []);
-
-  async function refresh() {
-    try {
-      const list = await listIterm2Profiles();
-      setProfiles(list);
-      setSelected((cur) => (cur ? list.find((p) => p.name === cur.name) ?? null : null));
-    } catch (e) {
-      setError(String(e));
-    }
-  }
   async function handleCreate() {
     const name = newName.trim();
     if (!name) {
@@ -190,15 +198,30 @@ export default function Iterm2Config() {
           <main className="min-w-0 flex-1">
             {selected ? (
               <div className="rounded-lg border border-gray-200 dark:border-gray-700">
-                <div className="border-b border-gray-200 px-4 py-2 text-xs text-gray-500 dark:border-gray-700">
-                  {selected.path}
+                <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+                  <span className="truncate text-xs text-gray-500">{selected.path}</span>
+                  <button
+                    onClick={() => void refresh()}
+                    className="ml-3 shrink-0 rounded-md bg-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                    title="从磁盘重新读取 profile 文件（同步 iTerm2 内的修改）"
+                  >
+                    读取
+                  </button>
                 </div>
                 <div className="p-4">
+                  {savedMessage && (
+                    <div className="mb-3 text-sm text-green-600 dark:text-green-400">
+                      {savedMessage}
+                    </div>
+                  )}
                   <Iterm2ConfigForm
-                    key={selected.name}
+                    key={`${selected.name}:${selected.content}`}
                     name={selected.name}
                     content={selected.content}
-                    onSaved={refresh}
+                    onSaved={(message) => {
+                      setSavedMessage(message);
+                      void refresh();
+                    }}
                   />
                 </div>
               </div>

@@ -71,6 +71,7 @@ describe("Iterm2Config", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     if (root) {
       act(() => {
         root.unmount();
@@ -140,6 +141,29 @@ describe("Iterm2Config", () => {
     expect(writeIterm2Profile).not.toHaveBeenCalled();
   });
 
+  it("reloads external changes when clicking the read button", async () => {
+    vi.mocked(listIterm2Profiles)
+      .mockResolvedValueOnce([P1])
+      .mockResolvedValueOnce([
+        { ...P1, content: JSON.stringify({ Name: "External Edit" }, null, 2) },
+      ]);
+    root = await renderPage(container);
+    expect(container.textContent).toContain(P1.path);
+    await clickButton(container, "读取");
+    expect(listIterm2Profiles).toHaveBeenCalledTimes(2);
+    const nameInput = container.querySelector<HTMLInputElement>('input[placeholder="如 My Profile"]');
+    expect(nameInput?.value).toBe("External Edit");
+  });
+
+  it("shows an error when reading fails", async () => {
+    vi.mocked(listIterm2Profiles)
+      .mockResolvedValueOnce([P1])
+      .mockRejectedValueOnce(new Error("transient"));
+    root = await renderPage(container);
+    await clickButton(container, "读取");
+    expect(container.textContent).toContain("transient");
+  });
+
   it("shows an error when loading fails", async () => {
     vi.mocked(listIterm2Profiles).mockRejectedValue(new Error("boom"));
     root = await renderPage(container);
@@ -157,7 +181,7 @@ describe("Iterm2Config", () => {
     expect(container.textContent).toContain("read-only");
   });
 
-  it("refreshes the profile list after a save", async () => {
+  it("refreshes the profile list and shows a saved message after save", async () => {
     vi.mocked(listIterm2Profiles)
       .mockResolvedValueOnce([P1])
       .mockResolvedValueOnce([{ ...P1, content: JSON.stringify({ Name: "Updated" }, null, 2) }]);
@@ -169,6 +193,21 @@ describe("Iterm2Config", () => {
       "default.json",
       JSON.stringify({ Name: "Default" }, null, 2),
     );
+    expect(container.textContent).toContain("已保存（修改 0 项，删除 0 项）");
+  });
+
+  it("clears the saved message after it times out", async () => {
+    vi.useFakeTimers();
+    vi.mocked(listIterm2Profiles).mockResolvedValue([P1]);
+    vi.mocked(writeIterm2Profile).mockResolvedValue(undefined);
+    root = await renderPage(container);
+    await clickButton(container, "保存");
+    const parentMsg = container.querySelector("div.mb-3.text-sm");
+    expect(parentMsg?.textContent).toContain("已保存（修改");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4001);
+    });
+    expect(container.querySelector("div.mb-3.text-sm")).toBeNull();
   });
 
   it("deletes a profile after two-step confirmation", async () => {

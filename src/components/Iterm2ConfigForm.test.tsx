@@ -17,6 +17,9 @@ const CONTENT = JSON.stringify(
     Opacity: 0.75,
     Enabled: true,
     Color: "#ff0000",
+    "Custom Command": "Yes",
+    "Cursor Type": "box",
+    "Background Color": [0.33, 0.13, 0.14, 1],
     Nested: { a: 1 },
     Tags: ["a", "b"],
   },
@@ -73,10 +76,31 @@ function readonlyInputs(container: HTMLElement): HTMLInputElement[] {
   return [...container.querySelectorAll<HTMLInputElement>("input[readonly]")];
 }
 
-function addInputs(container: HTMLElement): HTMLInputElement[] {
-  return [...container.querySelectorAll<HTMLInputElement>("input")].filter(
-    (i) => i.placeholder === "键名，如 Name" || i.placeholder === "值",
+function keySelect(container: HTMLElement): HTMLSelectElement {
+  const el = container.querySelector<HTMLSelectElement>('select[title="从官方支持的 key 中选择"]');
+  expect(el).not.toBeNull();
+  return el!;
+}
+
+function addValueControl(container: HTMLElement): HTMLSelectElement | HTMLInputElement {
+  const area = container.querySelector<HTMLElement>("div.mb-4.space-y-2");
+  expect(area).not.toBeNull();
+  const number = area?.querySelector<HTMLInputElement>('input[type="number"]');
+  if (number) return number;
+  const select = area?.querySelector<HTMLSelectElement>(
+    'select:not([title="从官方支持的 key 中选择"])',
   );
+  if (select) return select;
+  const input = area?.querySelector<HTMLInputElement>("input");
+  expect(input).not.toBeNull();
+  return input!;
+}
+
+function entryRow(container: HTMLElement, key: string): HTMLElement {
+  const rows = [...container.querySelectorAll<HTMLElement>("div.flex.items-center.gap-2")];
+  const row = rows.find((r) => r.querySelector("span")?.textContent === key);
+  expect(row).not.toBeUndefined();
+  return row!;
 }
 
 describe("Iterm2ConfigForm", () => {
@@ -113,6 +137,42 @@ describe("Iterm2ConfigForm", () => {
     expect(readonlyInputs(container).every((i) => i.readOnly)).toBe(true);
   });
 
+  it("renders list-typed controls for known keys", () => {
+    root = mount(container);
+    const customRow = entryRow(container, "Custom Command");
+    const customSelect = customRow.querySelector<HTMLSelectElement>("select");
+    expect(customSelect?.value).toBe("Yes");
+    expect([...customSelect!.options].map((o) => o.value)).toEqual(["Yes", "No"]);
+    const cursorRow = entryRow(container, "Cursor Type");
+    const cursorSelect = cursorRow.querySelector<HTMLSelectElement>("select");
+    expect(cursorSelect?.value).toBe("box");
+    expect([...cursorSelect!.options].map((o) => o.value)).toEqual([
+      "box",
+      "bar",
+      "underline",
+      "vertical bar",
+    ]);
+  });
+
+  it("renders color arrays as editable color controls", () => {
+    root = mount(container);
+    const row = entryRow(container, "Background Color");
+    const picker = row.querySelector<HTMLInputElement>('input[type="color"]');
+    expect(picker).not.toBeNull();
+    expect(picker?.value).toBe("#542124");
+    const text = row.querySelector<HTMLInputElement>('input:not([type="color"])');
+    expect(text?.value).toBe("[0.33,0.13,0.14,1]");
+  });
+
+  it("shows zh descriptions as entry hover titles and dropdown labels", () => {
+    root = mount(container);
+    const nameRow = entryRow(container, "Name");
+    expect(nameRow.querySelector("span")?.title).toBe("配置名称（必填）");
+    const select = keySelect(container);
+    const cursorOption = [...select.options].find((o) => o.value === "Cursor Type");
+    expect(cursorOption?.textContent).toContain("光标样式");
+  });
+
   it("edits a value and saves 2-space JSON preserving nested fields", async () => {
     const onSaved = vi.fn();
     root = mount(container, { onSaved });
@@ -127,6 +187,9 @@ describe("Iterm2ConfigForm", () => {
           Opacity: 0.5,
           Enabled: true,
           Color: "#ff0000",
+          "Custom Command": "Yes",
+          "Cursor Type": "box",
+          "Background Color": [0.33, 0.13, 0.14, 1],
           Nested: { a: 1 },
           Tags: ["a", "b"],
         },
@@ -149,25 +212,81 @@ describe("Iterm2ConfigForm", () => {
     );
   });
 
-  it("adds a new entry and saves", async () => {
+  it("adds a new key from the list with a typed control and saves", async () => {
     root = mount(container);
-    const inputs = addInputs(container);
-    setInputValue(inputs[0], "FontSize");
-    setInputValue(inputs[1], "13");
+    setSelectValue(keySelect(container), "Scrollback Lines");
+    const control = addValueControl(container) as HTMLInputElement;
+    expect(control.type).toBe("number");
+    setInputValue(control, "1000");
     await clickButton(container, "新增");
+    expect(container.textContent).toContain("Scrollback Lines");
     await clickButton(container, "保存");
     expect(writeIterm2Profile).toHaveBeenCalledWith(
       "default.json",
-      expect.stringContaining('"FontSize": 13'),
+      expect.stringContaining('"Scrollback Lines": 1000'),
     );
-    expect(container.textContent).toContain("已保存（修改 1 项，删除 0 项）");
   });
 
-  it("shows conflict hint when adding a duplicate key", async () => {
+  it("adds a yesno key keeping the string form", async () => {
     root = mount(container);
-    const inputs = addInputs(container);
-    setInputValue(inputs[0], "Name");
-    setInputValue(inputs[1], "other");
+    setSelectValue(keySelect(container), "Custom Command");
+    const control = addValueControl(container) as HTMLSelectElement;
+    expect([...control.options].map((o) => o.value)).toEqual(["Yes", "No"]);
+    setSelectValue(control, "No");
+    await clickButton(container, "新增");
+    expect(container.textContent).toContain("键 Custom Command 已存在");
+  });
+
+  it("rejects out-of-range number on add", async () => {
+    root = mount(container);
+    setSelectValue(keySelect(container), "Blur Radius");
+    const control = addValueControl(container) as HTMLInputElement;
+    setInputValue(control, "99");
+    await clickButton(container, "新增");
+    expect(container.textContent).toContain("值不能大于 30");
+  });
+
+  it("validates list values on save and keeps original content", async () => {
+    root = mount(container);
+    setSelectValue(keySelect(container), "Transparency");
+    const control = addValueControl(container) as HTMLInputElement;
+    setInputValue(control, "0.5");
+    await clickButton(container, "新增");
+    const row = entryRow(container, "Transparency");
+    const number = row.querySelector<HTMLInputElement>('input[type="number"]');
+    setInputValue(number!, "2");
+    await clickButton(container, "保存");
+    expect(container.textContent).toContain("值不能大于 1");
+    expect(writeIterm2Profile).not.toHaveBeenCalled();
+  });
+
+  it("saves color arrays back as JSON arrays", async () => {
+    root = mount(container);
+    const row = entryRow(container, "Background Color");
+    const text = row.querySelector<HTMLInputElement>('input:not([type="color"])');
+    setInputValue(text!, "[1, 0, 0]");
+    await clickButton(container, "保存");
+    expect(writeIterm2Profile).toHaveBeenCalledWith(
+      "default.json",
+      expect.stringContaining('"Background Color": [\n    1,\n    0,\n    0\n  ]'),
+    );
+  });
+
+  it("edits unknown keys with inferred controls", async () => {
+    root = mount(container);
+    const row = entryRow(container, "Opacity");
+    const number = row.querySelector<HTMLInputElement>('input[type="number"]');
+    setInputValue(number!, "0.9");
+    await clickButton(container, "保存");
+    expect(writeIterm2Profile).toHaveBeenCalledWith(
+      "default.json",
+      expect.stringContaining('"Opacity": 0.9'),
+    );
+  });
+
+  it("shows conflict hint when adding an existing key", async () => {
+    root = mount(container);
+    setSelectValue(keySelect(container), "Name");
     await clickButton(container, "新增");
     expect(container.textContent).toContain("键 Name 已存在");
   });
@@ -229,12 +348,84 @@ describe("Iterm2ConfigForm", () => {
     expect(container.textContent).toContain("invoke error");
   });
 
+  it("passes the saved message to onSaved", async () => {
+    const onSaved = vi.fn();
+    root = mount(container, { onSaved });
+    const number = container.querySelector<HTMLInputElement>('input[type="number"]');
+    setInputValue(number!, "0.5");
+    await clickButton(container, "保存");
+    expect(onSaved).toHaveBeenCalledWith("已保存（修改 1 项，删除 0 项）");
+  });
+
+  it("edits the first profile inside the Profiles wrapper and writes back wrapped", async () => {
+    const dp = JSON.stringify(
+      { Profiles: [{ Name: "NIO", "Cursor Type": 1, Opacity: 0.5 }] },
+      null,
+      2,
+    );
+    root = mount(container, { name: "dp.json", content: dp });
+    expect(container.textContent).toContain("Cursor Type");
+    expect(container.textContent).toContain("Name");
+    const number = container.querySelector<HTMLInputElement>('input[type="number"]');
+    setInputValue(number!, "0.9");
+    await clickButton(container, "保存");
+    expect(writeIterm2Profile).toHaveBeenCalledWith(
+      "dp.json",
+      JSON.stringify(
+        { Profiles: [{ Name: "NIO", "Cursor Type": 1, Opacity: 0.9 }] },
+        null,
+        2,
+      ),
+    );
+  });
+
+  it("keeps other profiles untouched when saving the first one", async () => {
+    const multi = JSON.stringify(
+      { Profiles: [{ Name: "A", Opacity: 0.5 }, { Name: "B", Opacity: 1 }] },
+      null,
+      2,
+    );
+    root = mount(container, { name: "m.json", content: multi });
+    expect(container.textContent).toContain("该文件包含 2 个 profile");
+    const number = container.querySelector<HTMLInputElement>('input[type="number"]');
+    setInputValue(number!, "0.9");
+    await clickButton(container, "保存");
+    expect(writeIterm2Profile).toHaveBeenCalledWith(
+      "m.json",
+      JSON.stringify(
+        { Profiles: [{ Name: "A", Opacity: 0.9 }, { Name: "B", Opacity: 1 }] },
+        null,
+        2,
+      ),
+    );
+  });
+
+  it("shows out-of-enum values as an extra option in the enum select", () => {
+    const dp = JSON.stringify({ Profiles: [{ "Cursor Type": 1 }] }, null, 2);
+    root = mount(container, { name: "ct.json", content: dp });
+    const row = entryRow(container, "Cursor Type");
+    const select = row.querySelector<HTMLSelectElement>("select");
+    expect(select).not.toBeNull();
+    expect([...select!.options].map((o) => o.value)).toEqual([
+      "box",
+      "bar",
+      "underline",
+      "vertical bar",
+      "1",
+    ]);
+  });
+
+  it("shows empty state for an empty profile inside the wrapper", () => {
+    root = mount(container, { name: "empty-profile.json", content: '{"Profiles": [{}]}' });
+    expect(container.textContent).toContain("暂无配置项，可在下方新增");
+  });
+
   it("shows empty state for empty object and supports adding", async () => {
     root = mount(container, { name: "empty.json", content: "{}" });
     expect(container.textContent).toContain("暂无配置项，可在下方新增");
-    const inputs = addInputs(container);
-    setInputValue(inputs[0], "Name");
-    setInputValue(inputs[1], "NIO");
+    setSelectValue(keySelect(container), "Name");
+    const control = addValueControl(container) as HTMLInputElement;
+    setInputValue(control, "NIO");
     await clickButton(container, "新增");
     await clickButton(container, "保存");
     expect(writeIterm2Profile).toHaveBeenCalledWith(

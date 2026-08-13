@@ -12,6 +12,9 @@ use crate::{
         delete_iterm2_profile_at, iterm2_profiles_dir, list_iterm2_profiles_at, reload_iterm2_impl,
         write_iterm2_profile_at, Iterm2ProfileFile, Iterm2ReloadStatus,
     },
+    iterm2_remote::{
+        merge_remote_keys, parse_iterm2_keys_html, parse_profile_model_keys, Iterm2RemoteKey,
+    },
     read_cmux_config_at, read_config as read_config_impl, read_ghosty_config_at,
     reload_cmux_config_impl,
     wallpaper::{self, SearchQuery, SourceSettings, ThumbState, WallpaperItem, WallpaperSettings},
@@ -67,6 +70,26 @@ pub async fn fetch_ghosty_keys() -> Result<Vec<GhostyRemoteKey>, String> {
         .await
         .map_err(|e| format!("read ghosty keys failed: {e}"))?;
     Ok(parse_ghosty_keys_html(&html))
+}
+
+#[tauri::command]
+pub async fn fetch_iterm2_keys() -> Vec<Iterm2RemoteKey> {
+    let mut sources: Vec<Vec<Iterm2RemoteKey>> = Vec::new();
+    if let Ok(resp) = reqwest::get("https://iterm2.com/documentation-dynamic-profiles.html").await {
+        if let Ok(html) = resp.text().await {
+            sources.push(parse_iterm2_keys_html(&html));
+        }
+    }
+    if let Ok(resp) = reqwest::get(
+        "https://raw.githubusercontent.com/gnachman/iTerm2/master/sources/ProfileModel.m",
+    )
+    .await
+    {
+        if let Ok(src) = resp.text().await {
+            sources.push(parse_profile_model_keys(&src));
+        }
+    }
+    merge_remote_keys(sources)
 }
 
 #[tauri::command]
@@ -291,6 +314,7 @@ pub fn run() {
             write_ghosty_config,
             reload_cmux_config,
             fetch_ghosty_keys,
+            fetch_iterm2_keys,
             list_system_fonts,
             list_iterm2_profiles,
             write_iterm2_profile,
