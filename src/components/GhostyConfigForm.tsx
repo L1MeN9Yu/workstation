@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   applyGhostyChanges,
   parseGhostyLines,
@@ -13,6 +13,7 @@ import {
   type GhostyKeySpec,
 } from "../lib/ghostyKeys";
 import { useGhostyKeys } from "../store/ghostyKeys";
+import { useSystemFonts } from "../store/systemFonts";
 import { writeGhostyConfig } from "../lib/cmuxConfig";
 import ReloadConfigButton from "./ReloadConfigButton";
 
@@ -77,6 +78,37 @@ function ValueControl({
     );
   }
   if (type === "number") {
+    if (spec?.min !== undefined && spec.max !== undefined) {
+      const numeric = Number(value);
+      const rangeValue =
+        numeric >= spec.min && numeric <= spec.max
+          ? numeric
+          : numeric > spec.max
+            ? spec.max
+            : spec.min;
+      return (
+        <div className="flex flex-1 items-center gap-2">
+          <input
+            type="range"
+            className="min-w-0 flex-1 cursor-pointer"
+            min={spec.min}
+            max={spec.max}
+            step={0.01}
+            value={rangeValue}
+            onChange={(ev) => onChange(ev.target.value)}
+          />
+          <input
+            type="number"
+            className="w-24 shrink-0 rounded-md border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-sm dark:border-gray-700 dark:bg-gray-900"
+            value={value}
+            min={spec.min}
+            max={spec.max}
+            onChange={(ev) => onChange(ev.target.value)}
+            onKeyDown={onKeyDown}
+          />
+        </div>
+      );
+    }
     return (
       <input
         type="number"
@@ -84,6 +116,18 @@ function ValueControl({
         value={value}
         min={spec?.min}
         max={spec?.max}
+        onChange={(ev) => onChange(ev.target.value)}
+        onKeyDown={onKeyDown}
+      />
+    );
+  }
+  if (type === "font") {
+    return (
+      <input
+        list="system-fonts"
+        className={className}
+        value={value}
+        placeholder={spec?.placeholder}
         onChange={(ev) => onChange(ev.target.value)}
         onKeyDown={onKeyDown}
       />
@@ -121,6 +165,12 @@ function ValueControl({
 
 export default function GhostyConfigForm({ content }: Props) {
   const keys = useGhostyKeys((s) => s.keys);
+  const fonts = useSystemFonts((s) => s.fonts);
+
+  useEffect(() => {
+    void useSystemFonts.getState().init();
+  }, []);
+
   const [entries, setEntries] = useState<Entry[]>(() =>
     initialEntries(parseGhostyLines(content), keys),
   );
@@ -228,6 +278,11 @@ export default function GhostyConfigForm({ content }: Props) {
 
   return (
     <div>
+      <datalist id="system-fonts">
+        {fonts.map((f) => (
+          <option key={f} value={f} />
+        ))}
+      </datalist>
       {error && (
         <div className="mb-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
           {error}

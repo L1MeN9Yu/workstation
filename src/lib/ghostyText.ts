@@ -21,7 +21,7 @@ export interface GhostyDirty {
   remove: Set<string>;
 }
 
-export type GhostyValueType = "bool" | "number" | "color" | "text" | "enum";
+export type GhostyValueType = "bool" | "number" | "color" | "font" | "text" | "enum";
 
 export function inferGhostyValueType(value: string): GhostyValueType {
   if (value === "true" || value === "false") return "bool";
