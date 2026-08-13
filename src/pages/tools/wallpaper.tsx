@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ToolPage } from "../ToolPage";
 import OpenLogDirButton from "../../components/OpenLogDirButton";
@@ -10,6 +17,7 @@ import {
   downloadWallpaper,
   generateSeed,
   loadWallpaperSettings,
+  previewWallpaper,
   saveWallpaperProxy,
   saveWallpaperSources,
   searchWallpapers,
@@ -32,6 +40,46 @@ interface SearchError {
 const MAX_THUMB_ATTEMPTS = 6;
 const THUMB_RETRY_MS = 1000;
 const SOURCE_SAVE_DEBOUNCE_MS = 500;
+const ZOOM_STEP = 1.2;
+const MIN_SCALE = 0.2;
+const MAX_SCALE = 5;
+/** 拖拽超过该距离（px）才视为平移，用于抑制拖拽结束后的 click 关闭 */
+const DRAG_THRESHOLD_PX = 4;
+
+/** 将缩放值限制在允许范围内 */
+function clampZoom(scale: number): number {
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+}
+
+/**
+ * 将平移 offset 限制在视口内：图片（缩放后）小于视口时不允许平移，
+ * 大于视口时最多拖到边缘对齐（图片不离开视口）。布局不可用时不做限制。
+ */
+function clampOffsetToViewport(
+  offset: { x: number; y: number },
+  scale: number,
+  imgWidth: number,
+  imgHeight: number,
+  viewWidth: number,
+  viewHeight: number,
+): { x: number; y: number } {
+  if (
+    imgWidth <= 0 ||
+    imgHeight <= 0 ||
+    viewWidth <= 0 ||
+    viewHeight <= 0
+  ) {
+    return offset;
+  }
+  const scaledWidth = imgWidth * scale;
+  const scaledHeight = imgHeight * scale;
+  const maxX = Math.max(0, (scaledWidth - viewWidth) / 2);
+  const maxY = Math.max(0, (scaledHeight - viewHeight) / 2);
+  return {
+    x: Math.min(maxX, Math.max(-maxX, offset.x)),
+    y: Math.min(maxY, Math.max(-maxY, offset.y)),
+  };
+}
 
 const thumbReadyListeners = new Set<() => void>();
 let thumbReadyVersion = 0;
@@ -111,7 +159,8 @@ function ProxiedThumb({ hash, alt, className }: ProxiedThumbProps) {
   if (failed) {
     return (
       <button
-        onClick={() => {
+        onClick={(e) => {
+          e.stopPropagation();
           setFailed(false);
           setAttempt((a) => a + 1);
         }}
@@ -233,6 +282,194 @@ export default function WallpaperTool() {
   const [hasMore, setHasMore] = useState(false);
   const pageRef = useRef(1);
   const saveTimerRef = useRef<number | null>(null);
+
+  // ---- Lightbox 预览状态 ----
+  const [previewItem, setPreviewItem] = useState<WallpaperItem | null>(null);
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const lightboxRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  /** 递增的请求序号，用于丢弃过期的预览请求结果 */
+  const previewReqRef = useRef(0);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
+  /** 拖拽结束后抑制紧随其后的 click，避免拖拽释放时误关预览 */
+  const justDraggedRef = useRef(false);
+
+  const closePreview = useCallback(() => {
+    previewReqRef.current += 1;
+    setPreviewItem(null);
+    setDataUrl(null);
+    setPreviewError(null);
+    setPreviewLoading(false);
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+    setDragging(false);
+  }, []);
+
+  async function openPreview(item: WallpaperItem): Promise<void> {
+    const reqId = previewReqRef.current + 1;
+    previewReqRef.current = reqId;
+    setPreviewItem(item);
+    setDataUrl(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+    try {
+      const url = await previewWallpaper(item);
+      if (previewReqRef.current !== reqId) return;
+      setDataUrl(url);
+    } catch (e) {
+      if (previewReqRef.current !== reqId) return;
+      setPreviewError(String(e));
+    } finally {
+      if (previewReqRef.current === reqId) {
+        setPreviewLoading(false);
+      }
+    }
+  }
+
+  function handleRetryPreview(): void {
+    if (previewItem) {
+      void openPreview(previewItem);
+    }
+  }
+
+  /** 按新缩放值调整 offset（可选光标锚点，缺省以视口中心为锚点） */
+  const applyZoom = useCallback(
+    (nextScale: number, anchor?: { x: number; y: number }): void => {
+      const img = imgRef.current;
+      const mask = lightboxRef.current;
+      if (!img || !mask) return;
+      const clamped = clampZoom(nextScale);
+      const k = clamped / scale;
+      const nextOffset = anchor
+        ? {
+            x: anchor.x * (1 - k) + offset.x * k,
+            y: anchor.y * (1 - k) + offset.y * k,
+          }
+        : { x: offset.x * k, y: offset.y * k };
+      setOffset(
+        clampOffsetToViewport(
+          nextOffset,
+          clamped,
+          img.offsetWidth,
+          img.offsetHeight,
+          mask.clientWidth,
+          mask.clientHeight,
+        ),
+      );
+      setScale(clamped);
+    },
+    [scale, offset],
+  );
+
+  function handleZoomIn(): void {
+    applyZoom(scale * ZOOM_STEP);
+  }
+
+  function handleZoomOut(): void {
+    applyZoom(scale / ZOOM_STEP);
+  }
+
+  function handleZoomReset(): void {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>): void {
+    if (e.button !== 0) return;
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: offset.x,
+      originY: offset.y,
+    };
+    setDragging(true);
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>): void {
+    const drag = dragRef.current;
+    const img = imgRef.current;
+    const mask = lightboxRef.current;
+    if (!drag || !img || !mask) return;
+    setOffset(
+      clampOffsetToViewport(
+        {
+          x: drag.originX + e.clientX - drag.startX,
+          y: drag.originY + e.clientY - drag.startY,
+        },
+        scale,
+        img.offsetWidth,
+        img.offsetHeight,
+        mask.clientWidth,
+        mask.clientHeight,
+      ),
+    );
+  }
+
+  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>): void {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const moved =
+      Math.abs(e.clientX - drag.startX) + Math.abs(e.clientY - drag.startY) >=
+      DRAG_THRESHOLD_PX;
+    dragRef.current = null;
+    setDragging(false);
+    if (moved) {
+      justDraggedRef.current = true;
+    }
+  }
+
+  function handleMaskClick(e: React.MouseEvent<HTMLDivElement>): void {
+    if (e.target !== e.currentTarget) return;
+    if (justDraggedRef.current) {
+      justDraggedRef.current = false;
+      return;
+    }
+    closePreview();
+  }
+
+  // Esc 关闭预览
+  useEffect(() => {
+    if (!previewItem) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closePreview();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [previewItem, closePreview]);
+
+  // 滚轮缩放（以光标为锚点），挂原生非被动监听以便 preventDefault
+  useEffect(() => {
+    const mask = lightboxRef.current;
+    if (!previewItem || !dataUrl || !mask) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const img = imgRef.current;
+      if (!img) return;
+      const rect = mask.getBoundingClientRect();
+      applyZoom(scale * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP), {
+        x: e.clientX - rect.left - rect.width / 2,
+        y: e.clientY - rect.top - rect.height / 2,
+      });
+    };
+    mask.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      mask.removeEventListener("wheel", onWheel);
+    };
+  }, [previewItem, dataUrl, scale, offset, applyZoom]);
 
   useEffect(() => {
     return () => {
@@ -715,7 +952,8 @@ export default function WallpaperTool() {
           {items.map((item) => (
             <div
               key={item.id}
-              className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
+              onClick={() => void openPreview(item)}
+              className="cursor-pointer overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <ProxiedThumb
                 hash={item.thumb_hash}
@@ -727,7 +965,10 @@ export default function WallpaperTool() {
                   {item.width}×{item.height}
                 </span>
                 <button
-                  onClick={() => void handleApply(item)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleApply(item);
+                  }}
                   disabled={applyingId === item.id}
                   className="rounded-md bg-blue-600 px-2 py-0.5 text-white disabled:opacity-50"
                 >
@@ -754,6 +995,124 @@ export default function WallpaperTool() {
       {!searching && !status && !errors.length && items.length === 0 && (
         <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
           搜索壁纸以预览，点击「下载并应用」设置 cmux 背景
+        </div>
+      )}
+
+      {previewItem && (
+        <div
+          ref={lightboxRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="壁纸预览"
+          className={`fixed inset-0 z-50 bg-black/80 ${
+            dragging ? "cursor-grabbing" : ""
+          }`}
+          onClick={handleMaskClick}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+        >
+          {/* 顶部工具条：缩放与关闭 */}
+          <div
+            className="absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-2 rounded-md bg-gray-900/80 p-2 text-white shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => void handleZoomIn()}
+              className="rounded-md bg-gray-700 px-2 py-1 text-sm hover:bg-gray-600"
+              title="放大"
+            >
+              ＋
+            </button>
+            <button
+              onClick={() => void handleZoomOut()}
+              className="rounded-md bg-gray-700 px-2 py-1 text-sm hover:bg-gray-600"
+              title="缩小"
+            >
+              －
+            </button>
+            <button
+              onClick={handleZoomReset}
+              className="rounded-md bg-gray-700 px-2 py-1 text-sm hover:bg-gray-600"
+              title="复位到 100%"
+            >
+              100%
+            </button>
+            <span className="px-1 text-xs text-gray-300">
+              {Math.round(scale * 100)}%
+            </span>
+            <button
+              onClick={closePreview}
+              aria-label="关闭预览"
+              className="rounded-md bg-red-600 px-2 py-1 text-sm hover:bg-red-500"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* 图片舞台：居中展示，加载/错误占位 */}
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {previewLoading && (
+              <div
+                className="pointer-events-auto flex animate-pulse items-center gap-2 text-gray-300"
+                role="status"
+              >
+                加载中...
+              </div>
+            )}
+            {previewError && !previewLoading && (
+              <div
+                className="pointer-events-auto flex flex-col items-center gap-3 text-gray-200"
+                role="alert"
+              >
+                <span>预览加载失败：{previewError}</span>
+                <button
+                  onClick={() => void handleRetryPreview()}
+                  className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-500"
+                >
+                  重试
+                </button>
+              </div>
+            )}
+            {dataUrl && !previewLoading && (
+              <img
+                ref={imgRef}
+                src={dataUrl}
+                alt={previewItem.id}
+                className="pointer-events-auto max-h-[85vh] max-w-[90vw] select-none"
+                style={{
+                  transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})`,
+                }}
+              />
+            )}
+          </div>
+
+          {/* 底部信息栏：分辨率 / 图源 / 下载应用 */}
+          <div
+            className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-md bg-gray-900/80 px-3 py-2 text-sm text-white shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <span>
+              {previewItem.width}×{previewItem.height}
+            </span>
+            <span className="text-gray-300">
+              {getSourceMeta(previewItem.source)?.label ?? previewItem.source}
+            </span>
+            <button
+              onClick={() => void handleApply(previewItem)}
+              disabled={applyingId === previewItem.id}
+              className="rounded-md bg-blue-600 px-2 py-1 text-white disabled:opacity-50"
+            >
+              {applyingId === previewItem.id ? "应用中..." : "下载并应用"}
+            </button>
+            {status && <span className="text-xs text-gray-300">{status}</span>}
+          </div>
         </div>
       )}
     </ToolPage>

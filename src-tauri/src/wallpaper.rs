@@ -378,6 +378,10 @@ async fn search_safebooru(
     Ok(out)
 }
 
+fn mime_from_content_type(content_type: &str) -> &'static str {
+    mime_for_ext(extension_from_content_type(content_type))
+}
+
 fn extension_from_content_type(content_type: &str) -> &str {
     let lower = content_type.to_ascii_lowercase();
     if lower.contains("png") {
@@ -456,6 +460,43 @@ pub async fn download_wallpaper(
     let stream = resp.bytes_stream().map_err(std::io::Error::other);
     write_download_stream(&path, stream).await?;
     Ok(path.display().to_string())
+}
+
+/// 通过代理下载原图，返回原始字节与推断的 mime（content-type 缺失时回退 image/jpeg），不落盘不缓存。
+pub async fn fetch_full_image(
+    item: WallpaperItem,
+    settings: WallpaperSettings,
+) -> Result<(Vec<u8>, String), String> {
+    let client = build_client(settings.proxy.as_deref())?;
+    let resp = client
+        .get(&item.full_url)
+        .send()
+        .await
+        .map_err(|e| format!("full image request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(http_error(resp.status(), "full image"));
+    }
+    let mime = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(mime_from_content_type)
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("full image body read failed: {e}"))?;
+    Ok((bytes.to_vec(), mime))
+}
+
+/// 将图片字节拼装为 `data:<mime>;base64,...` 形式的 data URL。
+pub fn full_image_data_url(bytes: &[u8], mime: &str) -> String {
+    use base64::Engine as _;
+    format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 fn default_download_dir_from(home: Option<PathBuf>) -> PathBuf {
@@ -2165,5 +2206,138 @@ mod tests {
         }"#;
         let settings: WallpaperSettings = serde_json::from_str(json).unwrap();
         assert_eq!(settings.source("wallhaven").min_width, None);
+    }
+
+    /// 按原始响应字符串原样回应的服务器，用于模拟缺失 Content-Type 或截断 body 等场景。
+    fn serve_raw(response: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
+                for line in reader.by_ref().lines() {
+                    let line = line.unwrap();
+                    if line.is_empty() {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn full_image_item(url: String) -> WallpaperItem {
+        WallpaperItem {
+            id: "wallhaven-full1".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            thumb_hash: String::new(),
+            full_url: url,
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    #[test]
+    fn fetch_full_image_returns_bytes_and_mime() {
+        let server = MockServer::new(vec![(200, "full-image-bytes", "image/png")]);
+        let item = full_image_item(format!("{}/full", server.base_url()));
+        let (bytes, mime) =
+            tauri::async_runtime::block_on(fetch_full_image(item, WallpaperSettings::default()))
+                .unwrap();
+        assert_eq!(bytes, b"full-image-bytes");
+        assert_eq!(mime, "image/png");
+        assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn fetch_full_image_derives_mime_from_webp_content_type() {
+        let server = MockServer::new(vec![(200, "webp-bytes", "image/webp")]);
+        let item = full_image_item(format!("{}/full", server.base_url()));
+        let (bytes, mime) =
+            tauri::async_runtime::block_on(fetch_full_image(item, WallpaperSettings::default()))
+                .unwrap();
+        assert_eq!(bytes, b"webp-bytes");
+        assert_eq!(mime, "image/webp");
+    }
+
+    #[test]
+    fn fetch_full_image_http_error_is_propagated() {
+        let server = MockServer::new(vec![(403, "nope", "text/plain")]);
+        let item = full_image_item(format!("{}/full", server.base_url()));
+        let err =
+            tauri::async_runtime::block_on(fetch_full_image(item, WallpaperSettings::default()))
+                .unwrap_err();
+        assert!(err.contains("full image"));
+        assert!(err.contains("HTTP 403"));
+    }
+
+    #[test]
+    fn fetch_full_image_network_error_is_propagated() {
+        let item = full_image_item("http://127.0.0.1:1/unreachable".to_string());
+        let err =
+            tauri::async_runtime::block_on(fetch_full_image(item, WallpaperSettings::default()))
+                .unwrap_err();
+        assert!(err.contains("full image request failed"));
+    }
+
+    #[test]
+    fn fetch_full_image_bad_proxy_is_propagated() {
+        let item = full_image_item("https://example.com/full.jpg".to_string());
+        let settings = WallpaperSettings {
+            proxy: Some("not a proxy url".to_string()),
+            ..WallpaperSettings::default()
+        };
+        let err = tauri::async_runtime::block_on(fetch_full_image(item, settings)).unwrap_err();
+        assert!(err.contains("invalid proxy"));
+    }
+
+    #[test]
+    fn fetch_full_image_missing_content_type_falls_back_to_jpeg() {
+        let base =
+            serve_raw("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nbytes");
+        let item = full_image_item(format!("{base}/full"));
+        let (bytes, mime) =
+            tauri::async_runtime::block_on(fetch_full_image(item, WallpaperSettings::default()))
+                .unwrap();
+        assert_eq!(bytes, b"bytes");
+        assert_eq!(mime, "image/jpeg");
+    }
+
+    #[test]
+    fn fetch_full_image_body_read_error_is_propagated() {
+        let base = serve_raw(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort",
+        );
+        let item = full_image_item(format!("{base}/full"));
+        let err =
+            tauri::async_runtime::block_on(fetch_full_image(item, WallpaperSettings::default()))
+                .unwrap_err();
+        assert!(err.contains("body read failed"));
+    }
+
+    #[test]
+    fn full_image_data_url_builds_base64_data_url() {
+        let url = full_image_data_url(b"hello", "image/jpeg");
+        assert_eq!(url, "data:image/jpeg;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn full_image_data_url_handles_empty_bytes_and_other_mime() {
+        let url = full_image_data_url(b"", "image/png");
+        assert_eq!(url, "data:image/png;base64,");
+    }
+
+    #[test]
+    fn mime_from_content_type_maps_common_types() {
+        assert_eq!(mime_from_content_type("image/gif"), "image/gif");
+        assert_eq!(
+            mime_from_content_type("application/octet-stream"),
+            "image/jpeg"
+        );
     }
 }

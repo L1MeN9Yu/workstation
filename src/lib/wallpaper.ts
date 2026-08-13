@@ -161,6 +161,11 @@ export function downloadWallpaper(item: WallpaperItem): Promise<string> {
   return invoke<string>("download_wallpaper", { item });
 }
 
+/** 拉取壁纸原图并返回 data URL（供查看器预览） */
+export function previewWallpaper(item: WallpaperItem): Promise<string> {
+  return invoke<string>("fetch_full_image", { item });
+}
+
 export function thumbUrl(hash: string): string {
   return `thumb://${hash}`;
 }

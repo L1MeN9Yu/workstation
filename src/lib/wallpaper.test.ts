@@ -10,6 +10,7 @@ import {
   downloadWallpaper,
   generateSeed,
   loadWallpaperSettings,
+  previewWallpaper,
   saveWallpaperProxy,
   saveWallpaperSources,
   searchWallpapers,
@@ -112,6 +113,36 @@ describe("wallpaper", () => {
 
   it("thumbUrl builds the thumb protocol url", () => {
     expect(thumbUrl("0123456789abcdef")).toBe("thumb://0123456789abcdef");
+  });
+
+  it("previewWallpaper invokes fetch_full_image and returns the data url", async () => {
+    mockedInvoke.mockResolvedValue("data:image/jpeg;base64,AAAA");
+    const item: WallpaperItem = {
+      id: "wallhaven-preview",
+      source: "wallhaven",
+      thumb_url: "https://thumb",
+      thumb_hash: "fedcba9876543210",
+      full_url: "https://full",
+      width: 1920,
+      height: 1080,
+    };
+    const url = await previewWallpaper(item);
+    expect(mockedInvoke).toHaveBeenCalledWith("fetch_full_image", { item });
+    expect(url).toBe("data:image/jpeg;base64,AAAA");
+  });
+
+  it("previewWallpaper propagates invoke failures", async () => {
+    mockedInvoke.mockRejectedValue(new Error("fetch failed"));
+    const item: WallpaperItem = {
+      id: "wallhaven-preview",
+      source: "wallhaven",
+      thumb_url: "https://thumb",
+      thumb_hash: "fedcba9876543210",
+      full_url: "https://full",
+      width: 1920,
+      height: 1080,
+    };
+    await expect(previewWallpaper(item)).rejects.toThrow("fetch failed");
   });
 
   it("loadWallpaperSettings merges stored values over defaults", async () => {
