@@ -223,6 +223,9 @@ pub fn log_frontend_event(payload: &str) {
 mod tests {
     use super::*;
 
+    /// 保护 `RUST_LOG` 环境变量读写的互斥锁：多个测试并行运行时互相干扰（Windows 偶发）
+    static RUST_LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "workstation-log-test-{name}-{}",
@@ -354,12 +357,14 @@ mod tests {
 
     #[test]
     fn level_filter_defaults_to_info() {
+        let _guard = RUST_LOG_LOCK.lock().unwrap();
         std::env::remove_var("RUST_LOG");
         assert_eq!(level_filter(), LevelFilter::Info);
     }
 
     #[test]
     fn level_filter_parses_env_var() {
+        let _guard = RUST_LOG_LOCK.lock().unwrap();
         std::env::set_var("RUST_LOG", "debug");
         assert_eq!(level_filter(), LevelFilter::Debug);
         std::env::remove_var("RUST_LOG");
@@ -367,6 +372,7 @@ mod tests {
 
     #[test]
     fn level_filter_parses_first_comma_segment() {
+        let _guard = RUST_LOG_LOCK.lock().unwrap();
         std::env::set_var("RUST_LOG", "warn,frontend=debug");
         assert_eq!(level_filter(), LevelFilter::Warn);
         std::env::remove_var("RUST_LOG");
@@ -374,6 +380,7 @@ mod tests {
 
     #[test]
     fn level_filter_falls_back_on_invalid_value() {
+        let _guard = RUST_LOG_LOCK.lock().unwrap();
         std::env::set_var("RUST_LOG", "not-a-level");
         assert_eq!(level_filter(), LevelFilter::Info);
         std::env::remove_var("RUST_LOG");
