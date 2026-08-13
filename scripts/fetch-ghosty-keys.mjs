@@ -29,22 +29,45 @@ function stripTags(raw) {
 }
 
 function categorize(key) {
-  if (/^(font|adjust|grapheme|freetype|alpha-blending)-/.test(key))
+  if (
+    key.startsWith("font-") ||
+    key.startsWith("adjust-") ||
+    key.startsWith("grapheme-") ||
+    key.startsWith("freetype-") ||
+    key === "alpha-blending"
+  )
     return "字体与渲染";
   if (
-    /^(theme|background|foreground|palette|selection|search|minimum-contrast|cursor-color|cursor-text|bold-color|faint-opacity|split|unfocused)-/.test(
-      key,
-    )
+    key.startsWith("theme") ||
+    key.startsWith("background") ||
+    key.startsWith("foreground") ||
+    key.startsWith("palette") ||
+    key.startsWith("selection") ||
+    key.startsWith("search") ||
+    key.startsWith("minimum-contrast") ||
+    key.startsWith("cursor-color") ||
+    key.startsWith("cursor-text") ||
+    key.startsWith("bold-color") ||
+    key.startsWith("faint-opacity") ||
+    key.startsWith("split") ||
+    key.startsWith("unfocused")
   )
     return "外观与主题";
-  if (/^cursor-/.test(key)) return "光标";
-  if (/^(mouse|scroll)-/.test(key)) return "鼠标与滚动";
-  if (/^(window|gtk-window)-/.test(key)) return "窗口";
-  if (/^macos-/.test(key)) return "macOS";
-  if (/^(linux|gtk)-/.test(key)) return "Linux/GTK";
-  if (/^auto-update/.test(key)) return "更新";
-  if (/^notify-/.test(key)) return "通知";
-  if (/^(command|initial-command|shell-integration|term|keybind|clipboard)/.test(key))
+  if (key.startsWith("cursor-")) return "光标";
+  if (key.startsWith("mouse-") || key.startsWith("scroll-")) return "鼠标与滚动";
+  if (key.startsWith("window-")) return "窗口";
+  if (key.startsWith("macos-")) return "macOS";
+  if (key.startsWith("linux-") || key.startsWith("gtk-")) return "Linux/GTK";
+  if (key.startsWith("auto-update")) return "更新";
+  if (key.startsWith("notify-")) return "通知";
+  if (
+    key.startsWith("command") ||
+    key.startsWith("initial-command") ||
+    key.startsWith("shell-integration") ||
+    key.startsWith("term") ||
+    key.startsWith("keybind") ||
+    key.startsWith("clipboard")
+  )
     return "行为与终端";
   return "其他";
 }

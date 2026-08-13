@@ -10,6 +10,7 @@ export interface GhostyKeySpec {
   max?: number;
   placeholder?: string;
   description: string;
+  zh: string;
   category: string;
   introduced?: string;
 }
@@ -66,6 +67,8 @@ export function mergeGhostyKeys(
         key: r.key,
         type: "text",
         description: r.description,
+        // 远程新增 key 无人工中文描述，先用英文描述兜底
+        zh: r.description,
         category: r.category,
         introduced: r.introduced,
       },

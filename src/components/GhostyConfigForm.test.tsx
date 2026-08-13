@@ -98,6 +98,26 @@ describe("GhostyConfigForm", () => {
     ).toBe(true);
   });
 
+  it("shows Chinese description as hover title on known keys", () => {
+    root = mount(container);
+    const keyLabel = [...container.querySelectorAll("span")].find(
+      (s) => s.textContent === "font-size" && s.title !== "",
+    );
+    expect(keyLabel).toBeDefined();
+    expect(keyLabel!.title).toContain("字体大小");
+  });
+
+  it("shows key with Chinese description in add dropdown options", () => {
+    root = mount(container);
+    const keySelectEl = selects(container).find((s) =>
+      [...s.options].some((o) => o.value === "" && o.disabled),
+    )!;
+    expect(keySelectEl).toBeDefined();
+    const option = [...keySelectEl.options].find((o) => o.value === "font-size");
+    expect(option).toBeDefined();
+    expect(option!.textContent).toContain("字体大小");
+  });
+
   it("renders enum value not in list as an extra option", () => {
     root = mount(container, "cursor-style = weird\n");
     const select = selects(container).find((s) =>

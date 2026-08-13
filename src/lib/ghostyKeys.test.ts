@@ -51,6 +51,7 @@ describe("ghostyKeys", () => {
       key: "x",
       type: "enum",
       description: "",
+      zh: "",
       category: "",
     };
     expect(validateGhostyValue(spec, "v")).toBe("值必须是以下之一：");
@@ -95,7 +96,7 @@ describe("ghostyKeys", () => {
 });
   it("finds by custom keys list", () => {
     const custom: GhostyKeySpec[] = [
-      { key: "new-key", type: "bool", description: "", category: "" },
+      { key: "new-key", type: "bool", description: "", zh: "", category: "" },
     ];
     expect(findGhostyKey("new-key", custom)).toBe(custom[0]);
     expect(findGhostyKey("font-size", custom)).toBeUndefined();
@@ -103,8 +104,8 @@ describe("ghostyKeys", () => {
 
   it("filters by custom keys list", () => {
     const custom: GhostyKeySpec[] = [
-      { key: "alpha", type: "text", description: "first", category: "" },
-      { key: "beta", type: "text", description: "second", category: "" },
+      { key: "alpha", type: "text", description: "first", zh: "", category: "" },
+      { key: "beta", type: "text", description: "second", zh: "", category: "" },
     ];
     expect(filterGhostyKeys("alpha", custom)).toEqual([custom[0]]);
     expect(filterGhostyKeys("", custom)).toHaveLength(2);
@@ -118,6 +119,7 @@ describe("ghostyKeys", () => {
         type: "number",
         min: 1,
         description: "local desc",
+        zh: "",
         category: "字体与渲染",
       },
     ];
@@ -139,8 +141,8 @@ describe("ghostyKeys", () => {
 
   it("merges keeps local-only keys and sorts by key name", () => {
     const base: GhostyKeySpec[] = [
-      { key: "zz-local", type: "text", description: "local", category: "" },
-      { key: "aa-local", type: "bool", description: "local2", category: "" },
+      { key: "zz-local", type: "text", description: "local", zh: "", category: "" },
+      { key: "aa-local", type: "bool", description: "local2", zh: "", category: "" },
     ];
     const merged = mergeGhostyKeys(
       [{ key: "mm-remote", description: "r", category: "" }],

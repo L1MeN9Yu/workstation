@@ -242,9 +242,10 @@ export default function GhostyConfigForm({ content }: Props) {
         <div className="mb-3 space-y-2">
           {entries.map((e, i) => {
             const spec = findGhostyKey(e.key, keys);
+            const title = spec ? spec.zh : e.key;
             return (
               <div key={i} className="flex items-center gap-2">
-                <span className="w-44 shrink-0 truncate font-mono text-sm" title={e.key}>
+                <span className="w-44 shrink-0 truncate font-mono text-sm" title={title}>
                   {e.key}
                 </span>
                 <span className="text-gray-400">=</span>
@@ -285,8 +286,8 @@ export default function GhostyConfigForm({ content }: Props) {
             {categories.map((cat) => (
               <optgroup key={cat} label={cat}>
                 {keys.filter((k) => k.category === cat).map((k) => (
-                  <option key={k.key} value={k.key}>
-                    {k.key}
+                  <option key={k.key} value={k.key} title={k.zh}>
+                    {k.key} — {k.zh}
                   </option>
                 ))}
               </optgroup>
@@ -311,7 +312,7 @@ export default function GhostyConfigForm({ content }: Props) {
           }}
         />
         {newSpec && (
-          <p className="text-xs text-gray-500 dark:text-gray-400">{newSpec.description}</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400">{newSpec.zh}</p>
         )}
       </div>
 
