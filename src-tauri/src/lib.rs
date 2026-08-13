@@ -10,6 +10,7 @@ use serde_json::Value;
 pub mod fonts;
 pub mod ghosty_remote;
 pub mod iterm2;
+pub mod iterm2_remote;
 pub mod logging;
 pub mod runtime;
 pub mod wallpaper;

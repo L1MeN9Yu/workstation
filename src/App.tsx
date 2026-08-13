@@ -6,6 +6,7 @@ import Iterm2Config from "./pages/Iterm2Config";
 import { toolRegistry } from "./lib/toolsRegistry";
 import { useTheme, useInitTheme } from "./store/theme";
 import { useGhostyKeys } from "./store/ghostyKeys";
+import { useIterm2Keys } from "./store/iterm2Keys";
 
 export default function App() {
   useInitTheme();
@@ -14,6 +15,7 @@ export default function App() {
 
   useEffect(() => {
     void useGhostyKeys.getState().init();
+    void useIterm2Keys.getState().init();
   }, []);
 
   useEffect(() => {
