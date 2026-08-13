@@ -70,6 +70,13 @@ pub async fn fetch_ghosty_keys() -> Result<Vec<GhostyRemoteKey>, String> {
 }
 
 #[tauri::command]
+pub fn list_system_fonts() -> Vec<String> {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    crate::fonts::list_font_families_with(|| db.faces().cloned().collect())
+}
+
+#[tauri::command]
 pub fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
     reload_cmux_config_impl()
 }
@@ -284,6 +291,7 @@ pub fn run() {
             write_ghosty_config,
             reload_cmux_config,
             fetch_ghosty_keys,
+            list_system_fonts,
             list_iterm2_profiles,
             write_iterm2_profile,
             delete_iterm2_profile,

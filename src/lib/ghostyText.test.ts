@@ -22,6 +22,7 @@ describe("ghostyText", () => {
     expect(resolveGhostyEntryType("cursor-opacity", "foo")).toBe("number");
     expect(resolveGhostyEntryType("background", "foo")).toBe("color");
     expect(resolveGhostyEntryType("title", "true")).toBe("text");
+    expect(resolveGhostyEntryType("font-family", "Menlo")).toBe("font");
   });
 
   it("falls back to value inference for unknown keys", () => {

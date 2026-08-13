@@ -3,11 +3,17 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import GhostyConfigForm from "./GhostyConfigForm";
 import { writeGhostyConfig } from "../lib/cmuxConfig";
+import { listSystemFonts } from "../lib/systemFonts";
+import { useSystemFonts } from "../store/systemFonts";
 
 vi.mock("../lib/cmuxConfig", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/cmuxConfig")>();
   return { ...actual, writeGhostyConfig: vi.fn() };
 });
+
+vi.mock("../lib/systemFonts", () => ({
+  listSystemFonts: vi.fn(),
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -60,6 +66,10 @@ function numberInputs(container: HTMLElement): HTMLInputElement[] {
   return [...container.querySelectorAll<HTMLInputElement>('input[type="number"]')];
 }
 
+function rangeInputs(container: HTMLElement): HTMLInputElement[] {
+  return [...container.querySelectorAll<HTMLInputElement>('input[type="range"]')];
+}
+
 function selects(container: HTMLElement): HTMLSelectElement[] {
   return [...container.querySelectorAll<HTMLSelectElement>("select")];
 }
@@ -71,6 +81,9 @@ describe("GhostyConfigForm", () => {
   beforeEach(() => {
     vi.mocked(writeGhostyConfig).mockReset();
     vi.mocked(writeGhostyConfig).mockResolvedValue();
+    vi.mocked(listSystemFonts).mockReset();
+    vi.mocked(listSystemFonts).mockRejectedValue(new Error("tauri unavailable"));
+    useSystemFonts.setState({ fonts: [], source: "base" });
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -217,5 +230,111 @@ opacity-thing = custom-text
   it("shows empty state with no kv entries", () => {
     root = mount(container, "# only comment\n");
     expect(container.textContent).toContain("暂无配置项");
+  });
+
+  it("renders font key with datalist suggestions from store", async () => {
+    vi.mocked(listSystemFonts).mockResolvedValue(["Menlo", "JetBrains Mono"]);
+    root = mount(container, "font-family = Menlo\n");
+    await act(async () => {});
+    const input = container.querySelector<HTMLInputElement>('input[list="system-fonts"]');
+    expect(input).not.toBeNull();
+    expect(input!.value).toBe("Menlo");
+    const datalist = container.querySelector<HTMLDataListElement>("#system-fonts");
+    expect(datalist).not.toBeNull();
+    const options = [...datalist!.querySelectorAll("option")].map((o) => o.value);
+    expect(options).toEqual(["Menlo", "JetBrains Mono"]);
+  });
+
+  it("saves a manually typed comma-separated font value", async () => {
+    root = mount(container, "font-family = Menlo\n");
+    const input = container.querySelector<HTMLInputElement>('input[list="system-fonts"]');
+    expect(input).not.toBeNull();
+    setInputValue(input!, 'Monaco, "PingFang SC"');
+    await clickButton(container, "保存");
+    expect(writeGhostyConfig).toHaveBeenCalledWith('font-family = Monaco, "PingFang SC"\n');
+  });
+
+  it("degrades to plain font input when system font fetch fails", async () => {
+    vi.mocked(listSystemFonts).mockRejectedValue(new Error("tauri unavailable"));
+    root = mount(container, "font-family = Menlo\n");
+    await act(async () => {});
+    expect(container.querySelector<HTMLInputElement>('input[list="system-fonts"]')).not.toBeNull();
+    expect(container.querySelector("#system-fonts")).not.toBeNull();
+    expect(container.querySelectorAll("#system-fonts option")).toHaveLength(0);
+    expect(container.textContent).not.toContain("tauri unavailable");
+  });
+
+  it("keeps full current value even when not in font list", async () => {
+    vi.mocked(listSystemFonts).mockResolvedValue(["Menlo"]);
+    root = mount(container, "font-family = SomeCustomFont\n");
+    await act(async () => {});
+    const input = container.querySelector<HTMLInputElement>('input[list="system-fonts"]');
+    expect(input?.value).toBe("SomeCustomFont");
+  });
+
+  it("renders font input when adding font-family from key list", async () => {
+    root = mount(container, "# only\n");
+    setSelectValue(keySelect(container), "font-family");
+    const fontInput = container.querySelector<HTMLInputElement>('input[list="system-fonts"]');
+    expect(fontInput).not.toBeNull();
+    setInputValue(fontInput!, "JetBrains Mono");
+    await clickButton(container, "新增");
+    expect(container.textContent).toContain("font-family");
+    expect(container.querySelectorAll('input[list="system-fonts"]').length).toBeGreaterThan(0);
+  });
+
+  it("renders range and number inputs for bounded number key", () => {
+    root = mount(container, "background-opacity = 0.5\n");
+    const range = rangeInputs(container);
+    expect(range).toHaveLength(1);
+    expect(range[0]!.value).toBe("0.5");
+    expect(range[0]!.min).toBe("0");
+    expect(range[0]!.max).toBe("1");
+    const number = numberInputs(container).find((i) => i.value === "0.5");
+    expect(number).toBeDefined();
+  });
+
+  it("dragging range syncs number input and saves", async () => {
+    root = mount(container, "background-opacity = 0.5\n");
+    const range = rangeInputs(container)[0]!;
+    setInputValue(range, "0.8");
+    const number = numberInputs(container)[0]!;
+    expect(number.value).toBe("0.8");
+    await clickButton(container, "保存");
+    expect(writeGhostyConfig).toHaveBeenCalledWith("background-opacity = 0.8\n");
+  });
+
+  it("falls back to min when bounded number value is empty", () => {
+    root = mount(container, "unfocused-split-opacity =\n");
+    const range = rangeInputs(container);
+    expect(range).toHaveLength(1);
+    expect(range[0]!.value).toBe("0.15");
+  });
+
+  it("clamps out-of-range bounded number value to max on range", () => {
+    root = mount(container, "background-opacity = 2\n");
+    const range = rangeInputs(container)[0]!;
+    expect(range.value).toBe("1");
+  });
+
+  it("clamps invalid bounded number value to min on range", () => {
+    root = mount(container, "background-opacity = abc\n");
+    const range = rangeInputs(container)[0]!;
+    expect(range.value).toBe("0");
+  });
+
+  it("keeps plain number input for single-bounded number key", () => {
+    root = mount(container, "background-image-opacity = 1.5\n");
+    expect(rangeInputs(container)).toHaveLength(0);
+    const number = numberInputs(container)[0]!;
+    expect(number.value).toBe("1.5");
+    expect(number.min).toBe("0");
+    expect(number.max).toBe("");
+  });
+
+  it("keeps plain number input for unbounded number key", () => {
+    root = mount(container, "font-size = 13\n");
+    expect(rangeInputs(container)).toHaveLength(0);
+    expect(numberInputs(container)[0]!.value).toBe("13");
   });
 });

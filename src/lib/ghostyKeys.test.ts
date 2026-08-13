@@ -93,6 +93,21 @@ describe("ghostyKeys", () => {
   it("covers the official ghostty key set size", () => {
     expect(GHOSTY_KEYS.length).toBe(202);
   });
+
+  it("marks font-family keys as font type with picker placeholder", () => {
+    const fontKeys = [
+      "font-family",
+      "font-family-bold",
+      "font-family-italic",
+      "font-family-bold-italic",
+      "window-title-font-family",
+    ];
+    for (const key of fontKeys) {
+      const spec = findGhostyKey(key)!;
+      expect(spec.type).toBe("font");
+      expect(spec.placeholder).toBe("从本机字体选择或手动输入");
+    }
+  });
 });
   it("finds by custom keys list", () => {
     const custom: GhostyKeySpec[] = [
