@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import CmuxConfig from "./pages/CmuxConfig";
+import Iterm2Config from "./pages/Iterm2Config";
 import { toolRegistry } from "./lib/toolsRegistry";
 import { useTheme, useInitTheme } from "./store/theme";
 
@@ -52,6 +53,18 @@ export default function App() {
           >
             cmux 配置
           </NavLink>
+          <NavLink
+            to="/iterm2"
+            className={({ isActive }) =>
+              `block rounded-md px-3 py-2 text-sm ${
+                isActive
+                  ? "bg-blue-600 font-medium text-white"
+                  : "text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+              }`
+            }
+          >
+            iTerm2 配置
+          </NavLink>
           <div className="pt-2 text-xs font-medium uppercase tracking-wide text-gray-400">
             研发工具
           </div>
@@ -79,6 +92,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/cmux" replace />} />
           <Route path="/cmux" element={<CmuxConfig />} />
+          <Route path="/iterm2" element={<Iterm2Config />} />
           {toolRegistry.map((t) => (
             <Route key={t.id} path={t.path} element={<t.component />} />
           ))}

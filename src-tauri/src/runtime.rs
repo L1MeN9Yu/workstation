@@ -6,8 +6,13 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::{
-    cmux_config_path, ghosty_config_path, read_cmux_config_at, read_config as read_config_impl,
-    read_ghosty_config_at, reload_cmux_config_impl,
+    cmux_config_path, ghosty_config_path,
+    iterm2::{
+        delete_iterm2_profile_at, iterm2_profiles_dir, list_iterm2_profiles_at, reload_iterm2_impl,
+        write_iterm2_profile_at, Iterm2ProfileFile, Iterm2ReloadStatus,
+    },
+    read_cmux_config_at, read_config as read_config_impl, read_ghosty_config_at,
+    reload_cmux_config_impl,
     wallpaper::{self, SearchQuery, SourceSettings, ThumbState, WallpaperItem, WallpaperSettings},
     write_cmux_config_at, write_config as write_config_impl, write_ghosty_config_at,
     CmuxConfigFile, CmuxReloadStatus,
@@ -55,6 +60,32 @@ pub fn write_ghosty_config(content: String) -> Result<(), String> {
 #[tauri::command]
 pub fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
     reload_cmux_config_impl()
+}
+
+#[tauri::command]
+pub fn list_iterm2_profiles() -> Result<Vec<Iterm2ProfileFile>, String> {
+    let dir = iterm2_profiles_dir()
+        .ok_or_else(|| "cannot resolve iTerm2 DynamicProfiles dir".to_string())?;
+    list_iterm2_profiles_at(&dir)
+}
+
+#[tauri::command]
+pub fn write_iterm2_profile(name: String, content: String) -> Result<(), String> {
+    let dir = iterm2_profiles_dir()
+        .ok_or_else(|| "cannot resolve iTerm2 DynamicProfiles dir".to_string())?;
+    write_iterm2_profile_at(&dir, &name, &content)
+}
+
+#[tauri::command]
+pub fn delete_iterm2_profile(name: String) -> Result<(), String> {
+    let dir = iterm2_profiles_dir()
+        .ok_or_else(|| "cannot resolve iTerm2 DynamicProfiles dir".to_string())?;
+    delete_iterm2_profile_at(&dir, &name)
+}
+
+#[tauri::command]
+pub fn reload_iterm2_config() -> Result<Iterm2ReloadStatus, String> {
+    reload_iterm2_impl()
 }
 
 fn wallpaper_settings_from_config() -> WallpaperSettings {
@@ -240,6 +271,10 @@ pub fn run() {
             write_cmux_config,
             write_ghosty_config,
             reload_cmux_config,
+            list_iterm2_profiles,
+            write_iterm2_profile,
+            delete_iterm2_profile,
+            reload_iterm2_config,
             search_wallpapers,
             download_wallpaper,
             fetch_full_image,
