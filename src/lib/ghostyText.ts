@@ -1,3 +1,5 @@
+import { findGhostyKey, type GhostyKeySpec } from "./ghostyKeys";
+
 export type GhostyLine =
   | { type: "kv"; key: string; value: string; raw: string; indent: string }
   | { type: "comment"; raw: string }
@@ -19,13 +21,23 @@ export interface GhostyDirty {
   remove: Set<string>;
 }
 
-export type GhostyValueType = "bool" | "number" | "color" | "text";
+export type GhostyValueType = "bool" | "number" | "color" | "text" | "enum";
 
 export function inferGhostyValueType(value: string): GhostyValueType {
   if (value === "true" || value === "false") return "bool";
   if (/^-?\d+(\.\d+)?$/.test(value)) return "number";
   if (/^#[0-9a-fA-F]{3,8}$/.test(value) || /^rgb\(/.test(value)) return "color";
   return "text";
+}
+
+export function resolveGhostyEntryType(
+  key: string,
+  value: string,
+  keys?: readonly GhostyKeySpec[],
+): GhostyValueType {
+  const spec = findGhostyKey(key, keys);
+  if (spec) return spec.type === "text" ? "text" : spec.type;
+  return inferGhostyValueType(value);
 }
 
 export function applyGhostyChanges(lines: GhostyLine[], dirty: GhostyDirty): string {

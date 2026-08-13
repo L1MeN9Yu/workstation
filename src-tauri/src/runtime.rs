@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::{
     cmux_config_path, ghosty_config_path,
+    ghosty_remote::{parse_ghosty_keys_html, GhostyRemoteKey},
     iterm2::{
         delete_iterm2_profile_at, iterm2_profiles_dir, list_iterm2_profiles_at, reload_iterm2_impl,
         write_iterm2_profile_at, Iterm2ProfileFile, Iterm2ReloadStatus,
@@ -55,6 +56,17 @@ pub fn write_cmux_config(content: String) -> Result<(), String> {
 pub fn write_ghosty_config(content: String) -> Result<(), String> {
     let path = ghosty_config_path().ok_or_else(|| "ghosty config file not found".to_string())?;
     write_ghosty_config_at(&path, &content)
+}
+
+#[tauri::command]
+pub async fn fetch_ghosty_keys() -> Result<Vec<GhostyRemoteKey>, String> {
+    let html = reqwest::get("https://ghostty.org/docs/config/reference")
+        .await
+        .map_err(|e| format!("fetch ghosty keys failed: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("read ghosty keys failed: {e}"))?;
+    Ok(parse_ghosty_keys_html(&html))
 }
 
 #[tauri::command]
@@ -271,6 +283,7 @@ pub fn run() {
             write_cmux_config,
             write_ghosty_config,
             reload_cmux_config,
+            fetch_ghosty_keys,
             list_iterm2_profiles,
             write_iterm2_profile,
             delete_iterm2_profile,
