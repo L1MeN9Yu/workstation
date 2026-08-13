@@ -2209,23 +2209,23 @@ mod tests {
     }
 
     /// 按原始响应字符串原样回应的服务器，用于模拟缺失 Content-Type 或截断 body 等场景。
+    /// 测试调用方必定发起连接，accept 失败视为测试错误直接 panic（避免 if-let 分支导致覆盖率下降）。
     fn serve_raw(response: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut request_line = String::new();
-                let _ = reader.read_line(&mut request_line);
-                for line in reader.by_ref().lines() {
-                    let line = line.unwrap();
-                    if line.is_empty() {
-                        break;
-                    }
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
+            for line in reader.by_ref().lines() {
+                let line = line.unwrap();
+                if line.is_empty() {
+                    break;
                 }
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
             }
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
         });
         format!("http://{addr}")
     }
