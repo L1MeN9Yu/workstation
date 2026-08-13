@@ -251,9 +251,9 @@ mod tests {
 
     #[test]
     fn list_iterm2_profiles_at_errors_on_unreadable_dir() {
-        let dir = temp_dir("list-unreadable-dir");
         #[cfg(unix)]
         {
+            let dir = temp_dir("list-unreadable-dir");
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
             assert!(list_iterm2_profiles_at(&dir).is_err());
@@ -325,10 +325,10 @@ mod tests {
 
     #[test]
     fn delete_iterm2_profile_at_errors_on_unwritable_dir() {
-        let dir = temp_dir("delete-unwritable");
-        fs::write(dir.join("x.json"), "{}").unwrap();
         #[cfg(unix)]
         {
+            let dir = temp_dir("delete-unwritable");
+            fs::write(dir.join("x.json"), "{}").unwrap();
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
             assert!(delete_iterm2_profile_at(&dir, "x.json").is_err());
