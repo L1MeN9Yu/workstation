@@ -6,9 +6,11 @@ import {
   applyWallpaperToGhosty,
   downloadWallpaper,
   loadWallpaperSettings,
+  previewWallpaper,
   saveWallpaperProxy,
   saveWallpaperSources,
   searchWallpapers,
+  type WallpaperItem,
 } from "../../lib/wallpaper";
 
 const { readyCallbackRef } = vi.hoisted(() => ({
@@ -46,6 +48,7 @@ vi.mock("../../lib/wallpaper", () => ({
   applyWallpaperToGhosty: vi.fn(),
   downloadWallpaper: vi.fn(),
   loadWallpaperSettings: vi.fn(),
+  previewWallpaper: vi.fn(),
   saveWallpaperProxy: vi.fn().mockResolvedValue(undefined),
   saveWallpaperSources: vi.fn().mockResolvedValue(undefined),
   searchWallpapers: vi.fn(),
@@ -65,6 +68,16 @@ async function flush(): Promise<void> {
     await Promise.resolve();
   });
 }
+
+const PREVIEW_ITEM: WallpaperItem = {
+  id: "wallhaven-preview",
+  source: "wallhaven",
+  thumb_url: "https://thumb.example/a.jpg",
+  thumb_hash: "aaaaaaaaaaaaaaaa",
+  full_url: "https://full.example/a.jpg",
+  width: 1920,
+  height: 1080,
+};
 
 describe("WallpaperTool", () => {
   let container: HTMLElement;
@@ -915,5 +928,304 @@ describe("WallpaperTool", () => {
       }),
     );
     expect(container.textContent).toContain("seed 已刷新并保存");
+  });
+
+  describe("Lightbox 预览", () => {
+    /** 搜索结果卡片（外层带点击打开预览的 div） */
+    function getCard(): HTMLElement {
+      return container.querySelector(
+        ".overflow-hidden.rounded-lg",
+      ) as HTMLElement;
+    }
+
+    /** 搜索得到 PREVIEW_ITEM 并点击卡片打开预览 */
+    async function openLightbox(): Promise<HTMLElement> {
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      return container.querySelector('[role="dialog"]') as HTMLElement;
+    }
+
+    /** 在对话框内按标题找按钮 */
+    function dialogButton(
+      dialog: HTMLElement,
+      title: string,
+    ): HTMLButtonElement {
+      return Array.from(dialog.querySelectorAll("button")).find(
+        (b) => b.title === title || b.getAttribute("aria-label") === title,
+      ) as HTMLButtonElement;
+    }
+
+    /** 在对话框内按文本找按钮（如下载并应用） */
+    function dialogTextButton(
+      dialog: HTMLElement,
+      text: string,
+    ): HTMLButtonElement {
+      return Array.from(dialog.querySelectorAll("button")).find(
+        (b) => b.textContent === text,
+      ) as HTMLButtonElement;
+    }
+
+    it("点击缩略图卡片打开预览，加载完成后展示 data URL 图片与元信息", async () => {
+      let resolvePreview!: (url: string) => void;
+      vi.mocked(previewWallpaper).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolvePreview = resolve;
+          }),
+      );
+      const dialog = await openLightbox();
+      expect(dialog).not.toBeNull();
+      expect(previewWallpaper).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "wallhaven-preview" }),
+      );
+      expect(dialog.textContent).toContain("加载中...");
+      expect(dialog.textContent).toContain("1920×1080");
+      expect(dialog.textContent).toContain("wallhaven");
+      await act(async () => {
+        resolvePreview("data:image/jpeg;base64,TEST");
+      });
+      await flush();
+      const img = dialog.querySelector("img")!;
+      expect(img.getAttribute("src")).toBe("data:image/jpeg;base64,TEST");
+      expect(img.style.transform).toContain("scale(1)");
+      expect(dialog.textContent).not.toContain("加载中...");
+    });
+
+    it("点击卡片上的「下载并应用」不打开预览", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      vi.mocked(downloadWallpaper).mockResolvedValue("/wall/a.jpg");
+      vi.mocked(applyWallpaperToGhosty).mockResolvedValue({
+        imagePath: "/wall/a.jpg",
+        reloadMessage: "ok",
+      });
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      const applyBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "下载并应用",
+      )!;
+      await act(async () => {
+        applyBtn.click();
+      });
+      expect(downloadWallpaper).toHaveBeenCalled();
+      expect(previewWallpaper).not.toHaveBeenCalled();
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("加载失败显示错误提示，点击重试后成功", async () => {
+      vi.mocked(previewWallpaper)
+        .mockRejectedValueOnce(new Error("proxy timeout"))
+        .mockResolvedValueOnce("data:image/jpeg;base64,RETRY");
+      const dialog = await openLightbox();
+      expect(dialog.textContent).toContain("预览加载失败");
+      expect(dialog.textContent).toContain("proxy timeout");
+      const retryBtn = Array.from(dialog.querySelectorAll("button")).find(
+        (b) => b.textContent === "重试",
+      )!;
+      await act(async () => {
+        retryBtn.click();
+      });
+      await flush();
+      const img = dialog.querySelector("img")!;
+      expect(img.getAttribute("src")).toBe("data:image/jpeg;base64,RETRY");
+      expect(dialog.textContent).not.toContain("预览加载失败");
+    });
+
+    it("按 Esc 关闭预览并复位状态", async () => {
+      vi.mocked(previewWallpaper)
+        .mockRejectedValueOnce(new Error("boom"))
+        .mockResolvedValueOnce("data:image/jpeg;base64,OK");
+      const dialog = await openLightbox();
+      expect(dialog.textContent).toContain("预览加载失败");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      });
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+      const card = getCard();
+      await act(async () => {
+        card.click();
+      });
+      await flush();
+      const dialog2 = container.querySelector('[role="dialog"]')!;
+      expect(dialog2.textContent).not.toContain("预览加载失败");
+      expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,OK",
+      );
+    });
+
+    it("点击遮罩关闭，点击图片不关闭", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightbox();
+      const img = dialog.querySelector("img")!;
+      await act(async () => {
+        img.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+      await act(async () => {
+        dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("关闭按钮关闭预览", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightbox();
+      await act(async () => {
+        dialogButton(dialog, "关闭预览").click();
+      });
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("工具条放大/缩小/复位按钮调整缩放与平移", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightbox();
+      const img = dialog.querySelector("img")!;
+      await act(async () => {
+        dialogButton(dialog, "放大").click();
+      });
+      expect(img.style.transform).toContain("scale(1.2)");
+      expect(dialog.textContent).toContain("120%");
+      await act(async () => {
+        dialogButton(dialog, "放大").click();
+      });
+      expect(img.style.transform).toContain("scale(1.44)");
+      await act(async () => {
+        dialogButton(dialog, "缩小").click();
+      });
+      expect(img.style.transform).toContain("scale(1.2)");
+      await act(async () => {
+        dialogButton(dialog, "复位到 100%").click();
+      });
+      expect(img.style.transform).toContain("translate3d(0px, 0px, 0) scale(1)");
+      expect(dialog.textContent).toContain("100%");
+    });
+
+    it("滚轮以光标为锚点缩放并限制在 0.2~5", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightbox();
+      const img = dialog.querySelector("img")!;
+      for (let i = 0; i < 10; i += 1) {
+        await act(async () => {
+          dialog.dispatchEvent(
+            new WheelEvent("wheel", { bubbles: true, deltaY: -100 }),
+          );
+        });
+      }
+      expect(img.style.transform).toContain("scale(5)");
+      expect(dialog.textContent).toContain("500%");
+      for (let i = 0; i < 20; i += 1) {
+        await act(async () => {
+          dialog.dispatchEvent(
+            new WheelEvent("wheel", { bubbles: true, deltaY: 100 }),
+          );
+        });
+      }
+      expect(img.style.transform).toContain("scale(0.2)");
+      expect(dialog.textContent).toContain("20%");
+    });
+
+    it("拖拽平移更新 offset，拖拽后的点击不关闭、再次点击关闭", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightbox();
+      const img = dialog.querySelector("img")!;
+      await act(async () => {
+        dialog.dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            clientX: 100,
+            clientY: 100,
+          }),
+        );
+        dialog.dispatchEvent(
+          new PointerEvent("pointermove", {
+            bubbles: true,
+            clientX: 200,
+            clientY: 150,
+          }),
+        );
+      });
+      expect(img.style.transform).toContain("translate3d(100px, 50px, 0)");
+      await act(async () => {
+        dialog.dispatchEvent(
+          new PointerEvent("pointerup", {
+            bubbles: true,
+            clientX: 200,
+            clientY: 150,
+          }),
+        );
+      });
+      await act(async () => {
+        dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+      await act(async () => {
+        dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("查看器内「下载并应用」成功与失败，且不关闭预览", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      vi.mocked(downloadWallpaper).mockResolvedValue("/wall/preview.jpg");
+      vi.mocked(applyWallpaperToGhosty).mockResolvedValue({
+        imagePath: "/wall/preview.jpg",
+        reloadMessage: "已生效",
+      });
+      const dialog = await openLightbox();
+      await act(async () => {
+        dialogTextButton(dialog, "下载并应用").click();
+      });
+      await flush();
+      expect(downloadWallpaper).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "wallhaven-preview" }),
+      );
+      expect(applyWallpaperToGhosty).toHaveBeenCalledWith("/wall/preview.jpg");
+      expect(dialog.textContent).toContain("已下载并应用");
+      expect(dialog.textContent).toContain("已生效");
+      expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+
+      vi.mocked(downloadWallpaper).mockRejectedValue(new Error("disk full"));
+      await act(async () => {
+        dialogTextButton(dialog, "下载并应用").click();
+      });
+      await flush();
+      expect(dialog.textContent).toContain("应用失败");
+      expect(dialog.textContent).toContain("disk full");
+    });
+
+    it("关闭后重新打开时预览状态复位", async () => {
+      vi.mocked(previewWallpaper).mockRejectedValue(new Error("old error"));
+      const dialog = await openLightbox();
+      expect(dialog.textContent).toContain("预览加载失败");
+      await act(async () => {
+        dialogButton(dialog, "关闭预览").click();
+      });
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,NEW");
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      const dialog2 = container.querySelector('[role="dialog"]')!;
+      expect(dialog2.textContent).not.toContain("预览加载失败");
+      expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,NEW",
+      );
+    });
   });
 });

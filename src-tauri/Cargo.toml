@@ -30,4 +30,5 @@ log = "0.4"
 log4rs = { version = "1", default-features = false, features = ["file_appender", "console_appender", "pattern_encoder", "chrono"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sha2 = "0.10"
+base64 = "0.22"
 

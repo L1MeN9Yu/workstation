@@ -133,6 +133,12 @@ pub async fn download_wallpaper(item: WallpaperItem) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn fetch_full_image(item: WallpaperItem) -> Result<String, String> {
+    let (bytes, mime) = wallpaper::fetch_full_image(item, wallpaper_settings_from_config()).await?;
+    Ok(wallpaper::full_image_data_url(&bytes, &mime))
+}
+
+#[tauri::command]
 pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
     let dir = app
         .path()
@@ -236,6 +242,7 @@ pub fn run() {
             reload_cmux_config,
             search_wallpapers,
             download_wallpaper,
+            fetch_full_image,
             open_log_dir
         ])
         .run(tauri::generate_context!())
