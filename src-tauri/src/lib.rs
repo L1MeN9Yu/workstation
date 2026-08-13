@@ -7,6 +7,7 @@ use serde::ser::SerializeStruct;
 use serde::Serialize;
 use serde_json::Value;
 
+pub mod ghosty_remote;
 pub mod iterm2;
 pub mod logging;
 pub mod runtime;

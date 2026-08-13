@@ -3,6 +3,7 @@ import {
   applyGhostyChanges,
   inferGhostyValueType,
   parseGhostyLines,
+  resolveGhostyEntryType,
 } from "./ghostyText";
 
 describe("ghostyText", () => {
@@ -13,6 +14,21 @@ describe("ghostyText", () => {
     expect(inferGhostyValueType("#1a2b3c")).toBe("color");
     expect(inferGhostyValueType("rgb(1, 2, 3)")).toBe("color");
     expect(inferGhostyValueType("hello world")).toBe("text");
+  });
+
+  it("resolves entry type from key list first", () => {
+    expect(resolveGhostyEntryType("cursor-style", "foo")).toBe("enum");
+    expect(resolveGhostyEntryType("mouse-reporting", "foo")).toBe("bool");
+    expect(resolveGhostyEntryType("cursor-opacity", "foo")).toBe("number");
+    expect(resolveGhostyEntryType("background", "foo")).toBe("color");
+    expect(resolveGhostyEntryType("title", "true")).toBe("text");
+  });
+
+  it("falls back to value inference for unknown keys", () => {
+    expect(resolveGhostyEntryType("unknown-key", "true")).toBe("bool");
+    expect(resolveGhostyEntryType("unknown-key", "12.5")).toBe("number");
+    expect(resolveGhostyEntryType("unknown-key", "#abc")).toBe("color");
+    expect(resolveGhostyEntryType("unknown-key", "hello")).toBe("text");
   });
   it("classifies lines into kv/comment/blank", () => {
     const lines = parseGhostyLines(`# wallpaper

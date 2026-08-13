@@ -5,11 +5,16 @@ import CmuxConfig from "./pages/CmuxConfig";
 import Iterm2Config from "./pages/Iterm2Config";
 import { toolRegistry } from "./lib/toolsRegistry";
 import { useTheme, useInitTheme } from "./store/theme";
+import { useGhostyKeys } from "./store/ghostyKeys";
 
 export default function App() {
   useInitTheme();
   const { theme, toggle } = useTheme();
   const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    void useGhostyKeys.getState().init();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
