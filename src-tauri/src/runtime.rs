@@ -93,10 +93,18 @@ pub async fn fetch_iterm2_keys() -> Vec<Iterm2RemoteKey> {
 }
 
 #[tauri::command]
-pub fn list_system_fonts() -> Vec<String> {
-    let mut db = fontdb::Database::new();
-    db.load_system_fonts();
-    crate::fonts::list_font_families_with(|| db.faces().cloned().collect())
+pub async fn list_system_fonts(app: AppHandle) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cache = app.state::<crate::fonts::FontCache>();
+        let cache = &cache.0;
+        crate::fonts::list_font_families_cached(cache, || {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            db.faces().cloned().collect()
+        })
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -265,6 +273,7 @@ pub fn run() {
             fs::create_dir_all(&cache_dir)
                 .map_err(|e| format!("cannot create thumb cache dir: {e}"))?;
             app.manage(ThumbState::new(cache_dir));
+            app.manage(crate::fonts::FontCache::default());
             Ok(())
         })
         .register_uri_scheme_protocol("thumb", |webview, request| {
