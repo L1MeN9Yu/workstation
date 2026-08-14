@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  verify-version:
+    name: Verify tag matches tauri.conf.json version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CONF_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "Tag version: ${TAG_VERSION}"
+          echo "tauri.conf.json version: ${CONF_VERSION}"
+          if [ "${TAG_VERSION}" != "${CONF_VERSION}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match tauri.conf.json version ${CONF_VERSION}. Update the version in tauri.conf.json (and package.json / Cargo.toml) before tagging."
+            exit 1
+          fi
+          echo "version=${CONF_VERSION}" >> "$GITHUB_OUTPUT"
+
+  release-macos:
+    name: Build macOS app and publish release
+    needs: verify-version
+    runs-on: macos-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Build and publish to GitHub Release (draft)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Workstation ${{ needs.verify-version.outputs.version }}"
+          releaseDraft: true
+          releaseBody: |
+            Workstation ${{ needs.verify-version.outputs.version }}
+
+            自动构建产物（macOS，ad-hoc 自签名，未公证）：
+            - `.dmg` 安装包
+            - `.app` 压缩包（updater 使用）
+            - updater 签名与 manifest（`.sig` / `latest.json`）
+
+            > 首次打开提示"无法验证开发者"时，请右键（或按住 Control 点击）选择"打开"。
+          args: --target universal-apple-darwin

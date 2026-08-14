@@ -44,6 +44,27 @@ GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 时于 **Windows / mac
 - 前端：`npm ci` → `lint` → `typecheck` → `build`
 - 后端：`cargo fmt --check` → `clippy` → `test` → `build --release`
 
+## 发布（macOS）
+
+打 `v*.*.*` tag 触发 `.github/workflows/release.yml`：在 macOS 上构建 universal 安装包（`.app` / `.dmg`），使用 **ad-hoc 自签名**（无需 Apple 开发者证书，不做公证），并将产物（含 updater 的 `latest.json` 与 `.sig` 签名）上传为 GitHub Release **草稿**，人工确认后发布。
+
+发布流程：
+
+1. 同步版本号：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 三处 `version` 改为目标版本。
+2. 提交后打 tag：`git tag v<版本号>`（如 `v0.2.0`），`git push origin v<版本号>`。workflow 会校验 tag 与 `tauri.conf.json` 版本一致，不一致直接失败。
+3. 在 GitHub Releases 页面检查草稿产物（`.dmg`、`.app` 压缩包、`latest.json`、`.sig`），确认后手动发布。
+4. 用户侧：应用设置页「应用更新」可手动检查更新，启动时会静默检查一次；有新版本时下载安装并自动重启。
+
+> **注意（未公证应用的限制）**：由于未做 Apple 公证，用户首次打开 `.app`/`.dmg` 时系统会提示"无法验证开发者"。需右键（或按住 Control 点击）图标选择"打开"，或执行 `xattr -cr /Applications/Workstation.app` 后正常打开。应用内更新（updater）不受影响，但仍可能触发一次同样的首次打开提示。
+
+### 所需 GitHub Secrets
+
+| Secret | 用途 |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | updater 签名私钥（由 `npx @tauri-apps/cli signer generate` 生成，公钥已内置于 `tauri.conf.json`） |
+
+> 私钥丢失会使更新包无法签名（无法发布新版本），泄露则存在更新包伪造风险，请妥善保管；如需更换，重新生成密钥对并同步更新 `tauri.conf.json` 中的公钥。
+
 ## OpenSpec
 
 本仓库使用 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 做 spec 驱动开发。
