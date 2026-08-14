@@ -7,6 +7,8 @@ import { toolRegistry } from "./lib/toolsRegistry";
 import { useTheme, useInitTheme } from "./store/theme";
 import { useGhostyKeys } from "./store/ghostyKeys";
 import { useIterm2Keys } from "./store/iterm2Keys";
+import { initUpdateCheck } from "./store/update";
+import Settings from "./pages/Settings";
 
 export default function App() {
   useInitTheme();
@@ -16,6 +18,7 @@ export default function App() {
   useEffect(() => {
     void useGhostyKeys.getState().init();
     void useIterm2Keys.getState().init();
+    initUpdateCheck();
   }, []);
 
   useEffect(() => {
@@ -90,6 +93,18 @@ export default function App() {
               {t.label}
             </NavLink>
           ))}
+          <NavLink
+            to="/settings"
+            className={({ isActive }) =>
+              `block rounded-md px-3 py-2 text-sm ${
+                isActive
+                  ? "bg-blue-600 font-medium text-white"
+                  : "text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+              }`
+            }
+          >
+            设置
+          </NavLink>
         </nav>
         <div className="border-t border-gray-200 px-4 py-2 text-xs text-gray-400 dark:border-gray-800">
           Workstation v{version || "0.1.0"}
@@ -103,6 +118,7 @@ export default function App() {
           {toolRegistry.map((t) => (
             <Route key={t.id} path={t.path} element={<t.component />} />
           ))}
+          <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
     </div>
