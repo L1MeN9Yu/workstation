@@ -751,17 +751,6 @@ export default function WallpaperTool() {
         <div className="mb-3 space-y-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
           <div className="text-sm font-medium">统一设置</div>
           <label className="block text-sm">
-            代理地址（留空则直连）
-            <input
-              value={settings.proxy}
-              onChange={(e) =>
-                setSettings({ ...settings, proxy: e.target.value })
-              }
-              placeholder="http://127.0.0.1:7890"
-              className={inputClass}
-            />
-          </label>
-          <label className="block text-sm">
             下载目录（留空使用默认 ~/.config/cmux/wallpapers）
             <input
               value={settings.downloadDir}

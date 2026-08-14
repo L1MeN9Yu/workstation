@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { useUpdateStore } from "../store/update";
+import { getGlobalProxy, saveGlobalProxy } from "../lib/proxy";
 import { ToolPage } from "./ToolPage";
 
 function formatBytes(bytes: number | null): string {
@@ -9,6 +11,75 @@ function formatBytes(bytes: number | null): string {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ProxySection() {
+  const [proxy, setProxy] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getGlobalProxy().then((value) => {
+      if (!cancelled) setProxy(value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleSave() {
+    if (proxy === null) return;
+    setSaving(true);
+    setMessage(null);
+    setError(null);
+    try {
+      await saveGlobalProxy(proxy);
+      setMessage("代理配置已保存");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="max-w-xl rounded-lg border border-gray-200 p-4 dark:border-gray-700">
+      <h3 className="mb-1 text-sm font-semibold">网络代理</h3>
+      <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+        配置后应用更新检查与壁纸下载均走该代理（优先于系统代理）；留空表示直连。
+      </p>
+      <label className="block text-sm">
+        代理地址
+        <input
+          value={proxy ?? ""}
+          onChange={(e) => {
+            setProxy(e.target.value);
+            setMessage(null);
+            setError(null);
+          }}
+          placeholder="http://127.0.0.1:7890"
+          className="mt-1 w-full rounded-md border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-sm dark:border-gray-700 dark:bg-gray-900"
+        />
+      </label>
+      {message && (
+        <div className="mt-2 text-sm text-green-600 dark:text-green-400">{message}</div>
+      )}
+      {error && (
+        <div className="mt-2 text-sm text-red-500 dark:text-red-400">{error}</div>
+      )}
+      <div className="mt-3">
+        <button
+          onClick={handleSave}
+          disabled={saving || proxy === null}
+          className="rounded-md bg-gray-200 px-4 py-1.5 text-sm text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
+        >
+          {saving ? "保存中..." : "保存"}
+        </button>
+      </div>
+    </section>
+  );
 }
 
 export default function Settings() {
@@ -126,6 +197,9 @@ export default function Settings() {
           )}
         </div>
       </section>
+      <div className="mt-4">
+        <ProxySection />
+      </div>
     </ToolPage>
   );
 }

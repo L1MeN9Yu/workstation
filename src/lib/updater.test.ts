@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Update } from "@tauri-apps/plugin-updater";
 
 const invokeMock = vi.fn();
+const pluginCheckMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
 vi.mock("@tauri-apps/plugin-updater", () => ({
-  check: vi.fn(),
+  check: (...args: unknown[]) => pluginCheckMock(...args),
 }));
 
 import {
@@ -22,6 +23,7 @@ describe("updater lib", () => {
   beforeEach(() => {
     delete window.__TAURI_INTERNALS__;
     invokeMock.mockReset();
+    pluginCheckMock.mockReset();
     vi.restoreAllMocks();
   });
 
@@ -52,6 +54,18 @@ describe("updater lib", () => {
   it("createUpdateApi exposes the plugin check function", () => {
     const api = createUpdateApi();
     expect(typeof api.check).toBe("function");
+  });
+
+  it("createUpdateApi without proxy calls check without options", async () => {
+    pluginCheckMock.mockResolvedValue(null);
+    await createUpdateApi().check();
+    expect(pluginCheckMock).toHaveBeenCalledWith();
+  });
+
+  it("createUpdateApi with proxy passes proxy option to check", async () => {
+    pluginCheckMock.mockResolvedValue(null);
+    await createUpdateApi("http://127.0.0.1:7890").check();
+    expect(pluginCheckMock).toHaveBeenCalledWith({ proxy: "http://127.0.0.1:7890" });
   });
 
   it("downloadWithProgress reports total from Started and accumulates chunks", async () => {

@@ -9,8 +9,10 @@ export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
 }
 
-export function createUpdateApi(): UpdateApi {
-  return { check };
+export function createUpdateApi(proxy = ""): UpdateApi {
+  return {
+    check: () => (proxy ? check({ proxy }) : check()),
+  };
 }
 
 export async function currentAppVersion(): Promise<string | null> {

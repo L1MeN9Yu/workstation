@@ -95,7 +95,6 @@ describe("WallpaperTool", () => {
       { name: "home.json", path: "/dir/home.json", content: "{}" },
     ]);
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
-      proxy: "http://127.0.0.1:7890",
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
@@ -538,7 +537,6 @@ describe("WallpaperTool", () => {
       reloadMessage: "iTerm2 已重新加载配置",
     });
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
-      proxy: "",
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "work.json",
@@ -617,7 +615,6 @@ describe("WallpaperTool", () => {
 
   it("applies to iterm2 when the stored default target is iterm2", async () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
-      proxy: "",
       downloadDir: "",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",
@@ -798,7 +795,7 @@ describe("WallpaperTool", () => {
       settingsBtn.click();
     });
     expect(container.textContent).toContain("统一设置");
-    expect(container.textContent).toContain("代理地址");
+    expect(container.textContent).not.toContain("代理地址");
     expect(container.textContent).toContain("下载目录");
     expect(container.textContent).not.toContain("Danbooru 参数");
     const saveBtn = Array.from(container.querySelectorAll("button")).find(
@@ -809,7 +806,6 @@ describe("WallpaperTool", () => {
     });
     expect(saveWallpaperProxy).toHaveBeenCalledWith(
       expect.objectContaining({
-        proxy: "http://127.0.0.1:7890",
         downloadDir: "",
       }),
     );
@@ -1029,7 +1025,6 @@ describe("WallpaperTool", () => {
 
   it("reflects stored ratios back to checked state", async () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
-      proxy: "",
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
@@ -1085,7 +1080,6 @@ describe("WallpaperTool", () => {
 
   it("unchecking all ratios clears the stored value", async () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
-      proxy: "",
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
@@ -1156,7 +1150,6 @@ describe("WallpaperTool", () => {
 
   it("rejects unchecking the last category option with an inline hint", async () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
-      proxy: "",
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
