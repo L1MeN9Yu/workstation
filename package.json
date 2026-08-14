@@ -12,6 +12,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "sync:version": "node scripts/sync-tauri-version.mjs",
+    "sync:version:release": "node scripts/sync-tauri-version.mjs --release",
+    "sync:version:check": "node scripts/sync-tauri-version.mjs --check",
+    "release": "changeset version && npm run sync:version:release && cross-env RELEASE_BUILD=1 npm run tauri build && npm run sync:version",
     "prepare": "husky"
   },
   "dependencies": {
@@ -28,6 +32,8 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@changesets/changelog-git": "^1.0.0",
+    "@changesets/cli": "^3.0.0",
     "@eslint/js": "^10.0.1",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2",
@@ -36,6 +42,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "@vitest/coverage-istanbul": "^4.1.10",
     "@vitest/coverage-v8": "^4.1.10",
+    "cross-env": "^10.1.0",
     "eslint": "^10.8.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.3",
