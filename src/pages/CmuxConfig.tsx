@@ -36,7 +36,7 @@ export default function CmuxConfig() {
   const active = tab === "cmux" ? cmux : ghosty;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-6">
+    <div className="w-full px-6 py-6">
       <h2 className="mb-1 text-xl font-semibold">cmux 配置</h2>
       <p className="mb-4 text-sm text-gray-500">
         为 cmux（AI coding 终端）提供图形化配置，把手写配置转为可视化操作。

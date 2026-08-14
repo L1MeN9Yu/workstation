@@ -106,7 +106,7 @@ export default function Iterm2Config() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-6">
+    <div className="w-full px-6 py-6">
       <h2 className="mb-1 text-xl font-semibold">iTerm2 配置</h2>
       <p className="mb-4 text-sm text-gray-500">
         管理 iTerm2 Dynamic Profiles，编辑保存后无需重启 iTerm2 即可生效。
