@@ -7,6 +7,22 @@ import {
   reloadStatusMessage,
   writeGhostyConfig,
 } from "./cmuxConfig";
+import {
+  listIterm2Profiles,
+  reloadIterm2Config,
+  reloadStatusMessage as iterm2ReloadStatus,
+  writeIterm2Profile,
+} from "./iterm2Config";
+
+/** 壁纸应用目标：cmux（写入 ghosty 配置）或 iTerm2（写入 Dynamic Profile） */
+export type ApplyWallpaperTarget = "cmux" | "iterm2";
+
+/** 将 iTerm2 配置重载状态转为用户可读消息 */
+export function iterm2ReloadStatusMessage(
+  result: Awaited<ReturnType<typeof reloadIterm2Config>>,
+): string {
+  return iterm2ReloadStatus(result);
+}
 
 export interface WallpaperItem {
   id: string;
@@ -40,12 +56,18 @@ export interface SourceSettings {
 export interface WallpaperSettings {
   proxy: string;
   downloadDir: string;
+  /** 默认壁纸应用目标 */
+  defaultApplyTarget: ApplyWallpaperTarget;
+  /** iTerm2 目标 Dynamic Profile 名称（应用目标为 iterm2 时使用） */
+  iterm2Profile: string;
   sources: Record<string, SourceSettings>;
 }
 
 export interface WallpaperSettingsInput {
   proxy: string;
   downloadDir: string;
+  defaultApplyTarget?: ApplyWallpaperTarget;
+  iterm2Profile?: string;
   sources?: Record<string, Partial<SourceSettings>>;
 }
 
@@ -131,6 +153,8 @@ export const DEFAULT_SOURCE_SETTINGS: SourceSettings = {
 export const DEFAULT_WALLPAPER_SETTINGS: WallpaperSettings = {
   proxy: "http://127.0.0.1:7890",
   downloadDir: "",
+  defaultApplyTarget: "cmux",
+  iterm2Profile: "",
   sources: {
     wallhaven: { ...DEFAULT_SOURCE_SETTINGS },
     danbooru: {
@@ -208,13 +232,21 @@ export async function loadWallpaperSettings(): Promise<WallpaperSettings> {
   return {
     proxy: stored?.proxy ?? DEFAULT_WALLPAPER_SETTINGS.proxy,
     downloadDir: stored?.downloadDir ?? DEFAULT_WALLPAPER_SETTINGS.downloadDir,
+    defaultApplyTarget:
+      stored?.defaultApplyTarget ??
+      DEFAULT_WALLPAPER_SETTINGS.defaultApplyTarget,
+    iterm2Profile:
+      stored?.iterm2Profile ?? DEFAULT_WALLPAPER_SETTINGS.iterm2Profile,
     sources,
   };
 }
 
-/** 保存代理/下载目录（全局网络配置，手动保存） */
+/** 保存代理/下载目录/应用目标（全局网络配置，手动保存） */
 export async function saveWallpaperProxy(
-  settings: Pick<WallpaperSettings, "proxy" | "downloadDir">,
+  settings: Pick<
+    WallpaperSettings,
+    "proxy" | "downloadDir" | "defaultApplyTarget" | "iterm2Profile"
+  >,
 ): Promise<void> {
   await writeConfig(SETTINGS_KEY, settings);
 }
@@ -229,6 +261,7 @@ export async function saveWallpaperSources(
 export interface ApplyWallpaperResult {
   imagePath: string;
   reloadMessage: string;
+  target: ApplyWallpaperTarget;
 }
 
 export async function applyWallpaperToGhosty(
@@ -240,5 +273,74 @@ export async function applyWallpaperToGhosty(
   const text = applyGhostyChanges(lines, { set, remove: new Set() });
   await writeGhostyConfig(text);
   const reload = await reloadCmuxConfig();
-  return { imagePath, reloadMessage: reloadStatusMessage(reload) };
+  return {
+    imagePath,
+    target: "cmux",
+    reloadMessage: reloadStatusMessage(reload),
+  };
+}
+
+/**
+ * 将壁纸应用到指定 iTerm2 Dynamic Profile 的 Background Image Location 并重载。
+ * profile 不存在或 JSON 解析失败时不写入任何文件。
+ */
+export async function applyWallpaperToIt(
+  imagePath: string,
+  profileName: string,
+): Promise<ApplyWallpaperResult> {
+  const profiles = await listIterm2Profiles();
+  const profile = profiles.find((p) => p.name === profileName);
+  if (!profile) {
+    throw new Error(`iTerm2 Profile 不存在：${profileName}`);
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(profile.content);
+  } catch (e) {
+    const err = new Error(`iTerm2 Profile JSON 解析失败：${String(e)}`);
+    Object.assign(err, { cause: e });
+    throw err;
+  }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new Error(`iTerm2 Profile 内容不是 JSON 对象：${profileName}`);
+  }
+  const record = data as Record<string, unknown>;
+  // 兼容 iTerm2 导出格式 {"Profiles":[{...}]}：属性写入 Profiles[0]；扁平 JSON 直接写顶层
+  let targetProfile = record;
+  if (Array.isArray(record.Profiles)) {
+    if (record.Profiles.length === 0) {
+      throw new Error(`iTerm2 Profile 的 Profiles 列表为空：${profileName}`);
+    }
+    const first = record.Profiles[0];
+    if (typeof first !== "object" || first === null || Array.isArray(first)) {
+      throw new Error(`iTerm2 Profile 的 Profiles[0] 不是 JSON 对象：${profileName}`);
+    }
+    targetProfile = first as Record<string, unknown>;
+  }
+  targetProfile["Background Image Location"] = imagePath;
+  await writeIterm2Profile(profile.name, JSON.stringify(record));
+  const reload = await reloadIterm2Config();
+  return {
+    imagePath,
+    target: "iterm2",
+    reloadMessage: iterm2ReloadStatusMessage(reload),
+  };
+}
+
+/** 按目标分发壁纸应用：cmux 走 ghosty 配置，iterm2 需提供目标 Profile 名 */
+export async function applyWallpaper(
+  imagePath: string,
+  target: ApplyWallpaperTarget,
+  profileName?: string,
+): Promise<ApplyWallpaperResult> {
+  if (target === "cmux") {
+    return applyWallpaperToGhosty(imagePath);
+  }
+  if (target === "iterm2") {
+    if (!profileName) {
+      throw new Error("应用目标为 iTerm2 时需指定 Profile");
+    }
+    return applyWallpaperToIt(imagePath, profileName);
+  }
+  throw new Error(`未知的应用目标：${target}`);
 }
