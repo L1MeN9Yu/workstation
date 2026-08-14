@@ -8,7 +8,7 @@ interface ToolPageProps {
 
 export function ToolPage({ title, description, children }: ToolPageProps) {
   return (
-    <div className="mx-auto w-full max-w-3xl px-6 py-6">
+    <div className="w-full px-6 py-6">
       <h2 className="mb-1 text-xl font-semibold">{title}</h2>
       {description && <p className="mb-4 text-sm text-gray-500">{description}</p>}
       {children}
