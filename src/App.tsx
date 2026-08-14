@@ -8,6 +8,7 @@ import { useTheme, useInitTheme } from "./store/theme";
 import { useGhostyKeys } from "./store/ghostyKeys";
 import { useIterm2Keys } from "./store/iterm2Keys";
 import { initUpdateCheck } from "./store/update";
+import { getGlobalProxy } from "./lib/proxy";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
   useEffect(() => {
     void useGhostyKeys.getState().init();
     void useIterm2Keys.getState().init();
+    void getGlobalProxy();
     initUpdateCheck();
   }, []);
 

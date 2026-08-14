@@ -14,6 +14,11 @@ vi.mock("../lib/updater", () => ({
   downloadWithProgress: vi.fn(async () => undefined),
 }));
 
+vi.mock("../lib/proxy", () => ({
+  getGlobalProxy: vi.fn(async () => ""),
+  saveGlobalProxy: vi.fn(async () => undefined),
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 async function renderPage(container: HTMLElement): Promise<Root> {
@@ -181,6 +186,72 @@ describe("Settings update section", () => {
       (b) => b.textContent === "重试下载",
     );
     expect(retryBtn).toBeDefined();
+    await act(async () => {
+      root.unmount();
+    });
+  });
+});
+
+describe("Settings network proxy section", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("loads and displays current global proxy", async () => {
+    const proxyModule = await import("../lib/proxy");
+    vi.mocked(proxyModule.getGlobalProxy).mockResolvedValue(
+      "http://127.0.0.1:7890",
+    );
+    const root = await renderPage(container);
+    expect(container.textContent).toContain("网络代理");
+    const input = container.querySelector("input") as HTMLInputElement;
+    expect(input.value).toBe("http://127.0.0.1:7890");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("saves proxy and shows success message", async () => {
+    const proxyModule = await import("../lib/proxy");
+    vi.mocked(proxyModule.getGlobalProxy).mockResolvedValue("");
+    const root = await renderPage(container);
+    const input = container.querySelector("input") as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(input, "http://192.168.1.1:8080");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickButton(container, "保存");
+    expect(proxyModule.saveGlobalProxy).toHaveBeenCalledWith(
+      "http://192.168.1.1:8080",
+    );
+    expect(container.textContent).toContain("代理配置已保存");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows error message when saving invalid proxy", async () => {
+    const proxyModule = await import("../lib/proxy");
+    vi.mocked(proxyModule.getGlobalProxy).mockResolvedValue("");
+    vi.mocked(proxyModule.saveGlobalProxy).mockRejectedValue(
+      new Error("代理地址无效"),
+    );
+    const root = await renderPage(container);
+    await clickButton(container, "保存");
+    expect(container.textContent).toContain("代理地址无效");
     await act(async () => {
       root.unmount();
     });

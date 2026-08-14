@@ -3,6 +3,9 @@ import type { Update } from "@tauri-apps/plugin-updater";
 
 function installUpdaterMock(overrides: Record<string, unknown> = {}) {
   vi.resetModules();
+  vi.doMock("../lib/proxy", () => ({
+    getGlobalProxy: vi.fn(async () => ""),
+  }));
   vi.doMock("../lib/updater", () => ({
     isTauriRuntime: vi.fn(() => true),
     currentAppVersion: vi.fn(async () => "0.1.0"),
@@ -52,6 +55,24 @@ describe("update store", () => {
     expect(useUpdateStore.getState().currentVersion).toBe("0.1.0");
   });
 
+  it("check passes global proxy to createUpdateApi", async () => {
+    installUpdaterMock({
+      createUpdateApi: vi.fn(() => ({
+        check: vi.fn(async () => null),
+      })),
+    });
+    const { useUpdateStore } = await loadStore();
+    const proxyModule = await import("../lib/proxy");
+    vi.mocked(proxyModule.getGlobalProxy).mockResolvedValue(
+      "http://127.0.0.1:7890",
+    );
+    await useUpdateStore.getState().check();
+    const updaterModule = await import("../lib/updater");
+    expect(vi.mocked(updaterModule.createUpdateApi)).toHaveBeenCalledWith(
+      "http://127.0.0.1:7890",
+    );
+  });
+
   it("check with available update transitions to available", async () => {
     installUpdaterMock({
       createUpdateApi: vi.fn(() => ({
@@ -94,6 +115,7 @@ describe("update store", () => {
     const { useUpdateStore } = await loadStore();
     const first = useUpdateStore.getState().check();
     const second = useUpdateStore.getState().check();
+    await new Promise((r) => setTimeout(r, 0));
     resolveCheck(null);
     await Promise.all([first, second]);
     expect(useUpdateStore.getState().status).toBe("idle");
@@ -192,8 +214,7 @@ describe("update store", () => {
     const { useUpdateStore } = await loadStore();
     void useUpdateStore.getState().downloadAndInstall();
     void useUpdateStore.getState().downloadAndInstall();
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
     expect(downloadCalls).toBe(1);
     expect(useUpdateStore.getState().status).toBe("downloading");
   });

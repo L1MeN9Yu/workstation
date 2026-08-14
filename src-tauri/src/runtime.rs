@@ -172,7 +172,25 @@ fn wallpaper_settings_from_config() -> WallpaperSettings {
             }
         }
     }
+    // 全局代理配置优先：非空走全局代理（reqwest .proxy() 自动禁用系统代理），
+    // 为空则直连（不再使用壁纸旧默认代理）。
+    settings.proxy = read_global_proxy();
     settings
+}
+
+/// 读取全局代理配置 `proxy.json` 的 `proxy` 字段；缺失/解析失败/空串返回 None（直连）。
+fn read_global_proxy() -> Option<String> {
+    let raw = read_config_impl("proxy".to_string());
+    match raw {
+        Ok(value) => match value.get("proxy").and_then(serde_json::Value::as_str) {
+            Some(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
+            _ => None,
+        },
+        Err(e) => {
+            log::warn!("global proxy config read failed: {e}");
+            None
+        }
+    }
 }
 
 #[tauri::command]

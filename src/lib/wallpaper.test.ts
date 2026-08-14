@@ -90,7 +90,6 @@ describe("wallpaper", () => {
     mockedInvoke.mockResolvedValue([]);
     const query = { source: "wallhaven", keywords: "", random: true };
     const settings = {
-      proxy: "http://127.0.0.1:7890",
       downloadDir: "",
       defaultApplyTarget: "cmux" as const,
       iterm2Profile: "",
@@ -169,7 +168,6 @@ describe("wallpaper", () => {
     vi.mocked(readConfig).mockImplementation(async (key: string) => {
       if (key === "wallpaper") {
         return {
-          proxy: "http://127.0.0.1:8888",
           downloadDir: "/custom",
           defaultApplyTarget: "iterm2",
           iterm2Profile: "work.json",
@@ -180,7 +178,6 @@ describe("wallpaper", () => {
     const settings = await loadWallpaperSettings();
     expect(readConfig).toHaveBeenCalledWith("wallpaper");
     expect(readConfig).toHaveBeenCalledWith("wallpaperSources");
-    expect(settings.proxy).toBe("http://127.0.0.1:8888");
     expect(settings.downloadDir).toBe("/custom");
     expect(settings.defaultApplyTarget).toBe("iterm2");
     expect(settings.iterm2Profile).toBe("work.json");
@@ -204,12 +201,8 @@ describe("wallpaper", () => {
 
   it("loadWallpaperSettings fills only missing keys from defaults", async () => {
     mockedInvoke.mockResolvedValue(null);
-    vi.mocked(readConfig).mockImplementation(async (key: string) => {
-      if (key === "wallpaper") return { proxy: "" };
-      return null;
-    });
+    vi.mocked(readConfig).mockResolvedValue(null);
     const settings = await loadWallpaperSettings();
-    expect(settings.proxy).toBe("");
     expect(settings.downloadDir).toBe(DEFAULT_WALLPAPER_SETTINGS.downloadDir);
   });
 
@@ -268,7 +261,6 @@ describe("wallpaper", () => {
     vi.mocked(readConfig).mockImplementation(async (key: string) => {
       if (key === "wallpaper") {
         return {
-          proxy: "",
           sources: {
             wallhaven: { categories: "111" },
           },
@@ -280,16 +272,14 @@ describe("wallpaper", () => {
     expect(settings.sources.wallhaven.categories).toBe("111");
   });
 
-  it("saveWallpaperProxy writes proxy, downloadDir and apply target", async () => {
+  it("saveWallpaperProxy writes downloadDir and apply target", async () => {
     mockedInvoke.mockResolvedValue(null);
     await saveWallpaperProxy({
-      proxy: "http://p",
       downloadDir: "/d",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",
     });
     expect(writeConfig).toHaveBeenCalledWith("wallpaper", {
-      proxy: "http://p",
       downloadDir: "/d",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",

@@ -5,6 +5,7 @@ import {
   downloadWithProgress,
   isTauriRuntime,
 } from "../lib/updater";
+import { getGlobalProxy } from "../lib/proxy";
 
 export type UpdateStatus =
   | "idle"
@@ -53,7 +54,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     try {
       const [version, update] = await Promise.all([
         currentAppVersion(),
-        createUpdateApi().check(),
+        getGlobalProxy().then((proxy) => createUpdateApi(proxy).check()),
       ]);
       if (!update) {
         set({ status: "idle", upToDate: true, currentVersion: version });
@@ -85,7 +86,9 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       errorMessage: null,
     });
     try {
-      const update = await createUpdateApi().check();
+      const update = await getGlobalProxy().then((proxy) =>
+        createUpdateApi(proxy).check(),
+      );
       if (!update) {
         set({ status: "idle", upToDate: true });
         return;

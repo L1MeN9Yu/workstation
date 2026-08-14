@@ -54,7 +54,6 @@ export interface SourceSettings {
 }
 
 export interface WallpaperSettings {
-  proxy: string;
   downloadDir: string;
   /** 默认壁纸应用目标 */
   defaultApplyTarget: ApplyWallpaperTarget;
@@ -64,7 +63,6 @@ export interface WallpaperSettings {
 }
 
 export interface WallpaperSettingsInput {
-  proxy: string;
   downloadDir: string;
   defaultApplyTarget?: ApplyWallpaperTarget;
   iterm2Profile?: string;
@@ -151,7 +149,6 @@ export const DEFAULT_SOURCE_SETTINGS: SourceSettings = {
 };
 
 export const DEFAULT_WALLPAPER_SETTINGS: WallpaperSettings = {
-  proxy: "http://127.0.0.1:7890",
   downloadDir: "",
   defaultApplyTarget: "cmux",
   iterm2Profile: "",
@@ -230,7 +227,6 @@ export async function loadWallpaperSettings(): Promise<WallpaperSettings> {
     sources[id] = mergeSourceSettings(rawSources[id], defaults);
   }
   return {
-    proxy: stored?.proxy ?? DEFAULT_WALLPAPER_SETTINGS.proxy,
     downloadDir: stored?.downloadDir ?? DEFAULT_WALLPAPER_SETTINGS.downloadDir,
     defaultApplyTarget:
       stored?.defaultApplyTarget ??
@@ -245,7 +241,7 @@ export async function loadWallpaperSettings(): Promise<WallpaperSettings> {
 export async function saveWallpaperProxy(
   settings: Pick<
     WallpaperSettings,
-    "proxy" | "downloadDir" | "defaultApplyTarget" | "iterm2Profile"
+    "downloadDir" | "defaultApplyTarget" | "iterm2Profile"
   >,
 ): Promise<void> {
   await writeConfig(SETTINGS_KEY, settings);
