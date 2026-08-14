@@ -6,7 +6,7 @@ export interface UpdateApi {
 }
 
 export function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && !!window.__TAURI__;
+  return typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
 }
 
 export function createUpdateApi(): UpdateApi {

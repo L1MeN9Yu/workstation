@@ -22,7 +22,7 @@ async function loadStore() {
 
 describe("update store", () => {
   beforeEach(() => {
-    delete window.__TAURI__;
+    delete window.__TAURI_INTERNALS__;
     vi.restoreAllMocks();
     vi.unmock("../lib/updater");
   });
@@ -199,7 +199,7 @@ describe("update store", () => {
   });
 
   it("initUpdateCheck runs once inside Tauri runtime", async () => {
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     installUpdaterMock();
     const { useUpdateStore, initUpdateCheck } = await loadStore();
     const spy = vi.spyOn(useUpdateStore.getState(), "check");

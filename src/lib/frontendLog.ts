@@ -18,7 +18,7 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let hookInstalled = false;
 
 export function isTauriEnv(): boolean {
-  return typeof window !== "undefined" && !!window.__TAURI__;
+  return typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
 }
 
 function formatArgs(args: unknown[]): string {

@@ -42,7 +42,7 @@ describe("theme store", () => {
     document.documentElement.classList.remove("dark");
     delete document.documentElement.dataset.theme;
     useTheme.setState({ theme: "light", _userTouched: false });
-    delete window.__TAURI__;
+    delete window.__TAURI_INTERNALS__;
     vi.restoreAllMocks();
   });
 
@@ -115,7 +115,7 @@ describe("theme store", () => {
   describe("inside Tauri runtime", () => {
     it("persists and reads theme through configStore", async () => {
       vi.resetModules();
-      Object.defineProperty(window, "__TAURI__", {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
         value: {},
         configurable: true,
       });
@@ -125,7 +125,7 @@ describe("theme store", () => {
         writeConfig: writeConfigMock,
       }));
       const { initTheme, useTheme: reloadedTheme } = await import("./theme");
-      expect(window.__TAURI__).toBeDefined();
+      expect(window.__TAURI_INTERNALS__).toBeDefined();
 
       await initTheme();
       expect(reloadedTheme.getState().theme).toBe("dark");
@@ -139,7 +139,7 @@ describe("theme store", () => {
 
     it("falls back to light when configStore read fails", async () => {
       vi.resetModules();
-      Object.defineProperty(window, "__TAURI__", {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
         value: {},
         configurable: true,
       });
@@ -157,7 +157,7 @@ describe("theme store", () => {
 
     it("falls back to light when stored config has no theme", async () => {
       vi.resetModules();
-      Object.defineProperty(window, "__TAURI__", {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
         value: {},
         configurable: true,
       });
@@ -173,7 +173,7 @@ describe("theme store", () => {
 
     it("initTheme does not override a toggle made before init completes", async () => {
       vi.resetModules();
-      Object.defineProperty(window, "__TAURI__", {
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
         value: {},
         configurable: true,
       });

@@ -2,7 +2,7 @@ import { create } from "zustand";
 
 type Theme = "light" | "dark";
 
-const isTauri = typeof window !== "undefined" && !!window.__TAURI__;
+const isTauri = typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
 
 interface ThemeState {
   theme: Theme;
