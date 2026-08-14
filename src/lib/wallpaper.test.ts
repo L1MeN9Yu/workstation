@@ -5,7 +5,9 @@ import {
   DEFAULT_SOURCE_SETTINGS,
   DEFAULT_WALLPAPER_SETTINGS,
   RATIO_OPTIONS,
+  applyWallpaper,
   applyWallpaperToGhosty,
+  applyWallpaperToIt,
   bitsToSelections,
   downloadWallpaper,
   generateSeed,
@@ -49,10 +51,25 @@ vi.mock("./cmuxConfig", () => ({
   reloadStatusMessage: vi.fn((r: { status: string }) => `msg:${r.status}`),
 }));
 
+vi.mock("./iterm2Config", () => ({
+  listIterm2Profiles: vi.fn(),
+  writeIterm2Profile: vi.fn(),
+  reloadIterm2Config: vi.fn(),
+  reloadStatusMessage: vi.fn((r: { status: string }) => `iterm-msg:${r.status}`),
+}));
+
 import { readGhostyConfig, writeGhostyConfig } from "./cmuxConfig";
+import {
+  listIterm2Profiles,
+  reloadIterm2Config,
+  writeIterm2Profile,
+} from "./iterm2Config";
 
 const mockedReadGhostyConfig = vi.mocked(readGhostyConfig);
 const mockedWriteGhostyConfig = vi.mocked(writeGhostyConfig);
+const mockedListIterm2Profiles = vi.mocked(listIterm2Profiles);
+const mockedWriteIterm2Profile = vi.mocked(writeIterm2Profile);
+const mockedReloadIterm2Config = vi.mocked(reloadIterm2Config);
 
 describe("wallpaper", () => {
   beforeEach(() => {
@@ -75,6 +92,8 @@ describe("wallpaper", () => {
     const settings = {
       proxy: "http://127.0.0.1:7890",
       downloadDir: "",
+      defaultApplyTarget: "cmux" as const,
+      iterm2Profile: "",
       sources: {
         wallhaven: {
           apiKey: "",
@@ -149,7 +168,12 @@ describe("wallpaper", () => {
     mockedInvoke.mockResolvedValue(null);
     vi.mocked(readConfig).mockImplementation(async (key: string) => {
       if (key === "wallpaper") {
-        return { proxy: "http://127.0.0.1:8888", downloadDir: "/custom" };
+        return {
+          proxy: "http://127.0.0.1:8888",
+          downloadDir: "/custom",
+          defaultApplyTarget: "iterm2",
+          iterm2Profile: "work.json",
+        };
       }
       return null;
     });
@@ -158,7 +182,17 @@ describe("wallpaper", () => {
     expect(readConfig).toHaveBeenCalledWith("wallpaperSources");
     expect(settings.proxy).toBe("http://127.0.0.1:8888");
     expect(settings.downloadDir).toBe("/custom");
+    expect(settings.defaultApplyTarget).toBe("iterm2");
+    expect(settings.iterm2Profile).toBe("work.json");
     expect(settings.sources.wallhaven).toEqual(DEFAULT_SOURCE_SETTINGS);
+  });
+
+  it("loadWallpaperSettings defaults apply target when not stored", async () => {
+    mockedInvoke.mockResolvedValue(null);
+    vi.mocked(readConfig).mockResolvedValue(null);
+    const settings = await loadWallpaperSettings();
+    expect(settings.defaultApplyTarget).toBe("cmux");
+    expect(settings.iterm2Profile).toBe("");
   });
 
   it("loadWallpaperSettings falls back to defaults when nothing stored", async () => {
@@ -246,12 +280,19 @@ describe("wallpaper", () => {
     expect(settings.sources.wallhaven.categories).toBe("111");
   });
 
-  it("saveWallpaperProxy writes only proxy and downloadDir", async () => {
+  it("saveWallpaperProxy writes proxy, downloadDir and apply target", async () => {
     mockedInvoke.mockResolvedValue(null);
-    await saveWallpaperProxy({ proxy: "http://p", downloadDir: "/d" });
+    await saveWallpaperProxy({
+      proxy: "http://p",
+      downloadDir: "/d",
+      defaultApplyTarget: "iterm2",
+      iterm2Profile: "work.json",
+    });
     expect(writeConfig).toHaveBeenCalledWith("wallpaper", {
       proxy: "http://p",
       downloadDir: "/d",
+      defaultApplyTarget: "iterm2",
+      iterm2Profile: "work.json",
     });
   });
 
@@ -279,7 +320,191 @@ describe("wallpaper", () => {
       "background-image = /wall/abc.jpg",
     );
     expect(result.imagePath).toBe("/wall/abc.jpg");
+    expect(result.target).toBe("cmux");
     expect(result.reloadMessage).toBe("msg:success");
+  });
+
+  it("applyWallpaper cmux target delegates to ghosty without profile", async () => {
+    mockedReadGhostyConfig.mockResolvedValue({
+      kind: "ghosty",
+      path: "/cfg",
+      content: "",
+    });
+    vi.mocked(writeGhostyConfig).mockResolvedValue(undefined);
+    const { reloadCmuxConfig } = await import("./cmuxConfig");
+    vi.mocked(reloadCmuxConfig).mockResolvedValue({ status: "success" });
+
+    const result = await applyWallpaper("/wall/a.jpg", "cmux");
+    expect(result.target).toBe("cmux");
+    expect(result.reloadMessage).toBe("msg:success");
+    expect(mockedWriteGhostyConfig).toHaveBeenCalled();
+    expect(mockedListIterm2Profiles).not.toHaveBeenCalled();
+  });
+
+  it("applyWallpaper iterm2 target requires a profile name", async () => {
+    await expect(applyWallpaper("/wall/a.jpg", "iterm2")).rejects.toThrow(
+      "需指定 Profile",
+    );
+    expect(mockedListIterm2Profiles).not.toHaveBeenCalled();
+  });
+
+  it("applyWallpaper iterm2 target delegates with the profile name", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "p.json", path: "/dir/p.json", content: '{"Name":"p"}' },
+    ]);
+    vi.mocked(writeIterm2Profile).mockResolvedValue(undefined);
+    vi.mocked(reloadIterm2Config).mockResolvedValue({ status: "success" });
+
+    const result = await applyWallpaper("/wall/it.jpg", "iterm2", "p.json");
+    expect(mockedWriteIterm2Profile).toHaveBeenCalledWith(
+      "p.json",
+      '{"Name":"p","Background Image Location":"/wall/it.jpg"}',
+    );
+    expect(result.target).toBe("iterm2");
+    expect(result.reloadMessage).toBe("iterm-msg:success");
+  });
+
+  it("applyWallpaper rejects unknown targets", async () => {
+    await expect(
+      applyWallpaper("/wall/a.jpg", "nope" as never),
+    ).rejects.toThrow("未知的应用目标");
+  });
+
+  it("applyWallpaperToIt writes Background Image Location and reloads", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      {
+        name: "work.json",
+        path: "/dir/work.json",
+        content: '{"Name":"work","Foreground Color":[0.9,0.9,0.9,1]}',
+      },
+    ]);
+    vi.mocked(writeIterm2Profile).mockResolvedValue(undefined);
+    vi.mocked(reloadIterm2Config).mockResolvedValue({ status: "success" });
+
+    const result = await applyWallpaperToIt("/wall/it.jpg", "work.json");
+
+    expect(mockedWriteIterm2Profile).toHaveBeenCalledWith(
+      "work.json",
+      JSON.stringify({
+        Name: "work",
+        "Foreground Color": [0.9, 0.9, 0.9, 1],
+        "Background Image Location": "/wall/it.jpg",
+      }),
+    );
+    expect(mockedReloadIterm2Config).toHaveBeenCalled();
+    expect(result).toEqual({
+      imagePath: "/wall/it.jpg",
+      target: "iterm2",
+      reloadMessage: "iterm-msg:success",
+    });
+  });
+
+  it("applyWallpaperToIt adds the key when profile has none", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "empty.json", path: "/dir/empty.json", content: '{"Name":"x"}' },
+    ]);
+    vi.mocked(writeIterm2Profile).mockResolvedValue(undefined);
+    vi.mocked(reloadIterm2Config).mockResolvedValue({
+      status: "mechanismUnavailable",
+    });
+
+    const result = await applyWallpaperToIt("/wall/it.jpg", "empty.json");
+    expect(mockedWriteIterm2Profile).toHaveBeenCalledWith(
+      "empty.json",
+      '{"Name":"x","Background Image Location":"/wall/it.jpg"}',
+    );
+    expect(result.reloadMessage).toBe("iterm-msg:mechanismUnavailable");
+  });
+
+  it("applyWallpaperToIt writes into Profiles[0] for exported format", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      {
+        name: "exported.json",
+        path: "/dir/exported.json",
+        content: '{"Profiles":[{"Guid":"g1","Name":"work","Window Type":0}]}',
+      },
+    ]);
+    vi.mocked(writeIterm2Profile).mockResolvedValue(undefined);
+    vi.mocked(reloadIterm2Config).mockResolvedValue({ status: "success" });
+
+    const result = await applyWallpaperToIt("/wall/it.jpg", "exported.json");
+    expect(mockedWriteIterm2Profile).toHaveBeenCalledWith(
+      "exported.json",
+      JSON.stringify({
+        Profiles: [
+          {
+            Guid: "g1",
+            Name: "work",
+            "Window Type": 0,
+            "Background Image Location": "/wall/it.jpg",
+          },
+        ],
+      }),
+    );
+    expect(result.target).toBe("iterm2");
+    expect(mockedReloadIterm2Config).toHaveBeenCalled();
+  });
+
+  it("applyWallpaperToIt fails on empty Profiles list", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "nop.json", path: "/dir/nop.json", content: '{"Profiles":[]}' },
+    ]);
+    await expect(applyWallpaperToIt("/wall/it.jpg", "nop.json")).rejects.toThrow(
+      "Profiles 列表为空",
+    );
+    expect(mockedWriteIterm2Profile).not.toHaveBeenCalled();
+  });
+
+  it("applyWallpaperToIt fails when Profiles[0] is not an object", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "bad.json", path: "/dir/bad.json", content: '{"Profiles":["x"]}' },
+    ]);
+    await expect(applyWallpaperToIt("/wall/it.jpg", "bad.json")).rejects.toThrow(
+      "Profiles[0] 不是 JSON 对象",
+    );
+    expect(mockedWriteIterm2Profile).not.toHaveBeenCalled();
+  });
+
+  it("applyWallpaperToIt fails when profile does not exist", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "a.json", path: "/dir/a.json", content: "{}" },
+    ]);
+    await expect(applyWallpaperToIt("/wall/it.jpg", "ghost")).rejects.toThrow(
+      "iTerm2 Profile 不存在",
+    );
+    expect(mockedWriteIterm2Profile).not.toHaveBeenCalled();
+    expect(mockedReloadIterm2Config).not.toHaveBeenCalled();
+  });
+
+  it("applyWallpaperToIt fails on invalid JSON without writing", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "bad.json", path: "/dir/bad.json", content: "not json" },
+    ]);
+    await expect(applyWallpaperToIt("/wall/it.jpg", "bad.json")).rejects.toThrow(
+      "JSON 解析失败",
+    );
+    expect(mockedWriteIterm2Profile).not.toHaveBeenCalled();
+    expect(mockedReloadIterm2Config).not.toHaveBeenCalled();
+  });
+
+  it("applyWallpaperToIt fails when profile content is not an object", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "arr.json", path: "/dir/arr.json", content: "[1,2]" },
+    ]);
+    await expect(applyWallpaperToIt("/wall/it.jpg", "arr.json")).rejects.toThrow(
+      "不是 JSON 对象",
+    );
+    expect(mockedWriteIterm2Profile).not.toHaveBeenCalled();
+  });
+
+  it("applyWallpaperToIt propagates write and reload failures", async () => {
+    mockedListIterm2Profiles.mockResolvedValue([
+      { name: "p.json", path: "/dir/p.json", content: "{}" },
+    ]);
+    vi.mocked(writeIterm2Profile).mockRejectedValue(new Error("disk full"));
+    await expect(applyWallpaperToIt("/wall/it.jpg", "p.json")).rejects.toThrow(
+      "disk full",
+    );
   });
 
   describe("位标记编解码", () => {

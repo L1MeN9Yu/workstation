@@ -12,7 +12,7 @@ import OpenLogDirButton from "../../components/OpenLogDirButton";
 import {
   BIT_GROUPS,
   RATIO_OPTIONS,
-  applyWallpaperToGhosty,
+  applyWallpaper,
   bitsToSelections,
   downloadWallpaper,
   generateSeed,
@@ -23,10 +23,12 @@ import {
   searchWallpapers,
   selectionsToBits,
   thumbUrl,
+  type ApplyWallpaperTarget,
   type SourceSettings,
   type WallpaperItem,
   type WallpaperSettings,
 } from "../../lib/wallpaper";
+import { listIterm2Profiles } from "../../lib/iterm2Config";
 import {
   WALLPAPER_SOURCES,
   getSourceMeta,
@@ -49,6 +51,29 @@ const DRAG_THRESHOLD_PX = 4;
 /** 将缩放值限制在允许范围内 */
 function clampZoom(scale: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+}
+
+/** 应用目标选择下拉（单次应用临时切换，不影响持久化默认值） */
+function TargetSelect({
+  value,
+  onChange,
+}: {
+  value: ApplyWallpaperTarget;
+  onChange: (target: ApplyWallpaperTarget) => void;
+}) {
+  return (
+    <select
+      value={value}
+      aria-label="应用目标"
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onChange={(e) => onChange(e.target.value as ApplyWallpaperTarget)}
+      className="rounded-md border border-gray-300 bg-gray-50 px-1 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-900"
+    >
+      <option value="cmux">cmux</option>
+      <option value="iterm2">iTerm2</option>
+    </select>
+  );
 }
 
 /**
@@ -278,6 +303,10 @@ export default function WallpaperTool() {
   const [settings, setSettings] = useState<WallpaperSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
+  /** 本次应用目标（单次切换，不持久化） */
+  const [applyTarget, setApplyTarget] = useState<ApplyWallpaperTarget>("cmux");
+  /** iTerm2 Dynamic Profile 列表（设置中目标 Profile 下拉选项） */
+  const [iterm2Profiles, setIterm2Profiles] = useState<string[]>([]);
   const [checkboxBlocked, setCheckboxBlocked] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const pageRef = useRef(1);
@@ -496,8 +525,28 @@ export default function WallpaperTool() {
   useEffect(() => {
     let cancelled = false;
     void loadWallpaperSettings().then((s) => {
-      if (!cancelled) setSettings(s);
+      if (!cancelled) {
+        setSettings(s);
+        // 以默认目标初始化本次应用目标（用户单次切换后不再覆盖）
+        setApplyTarget(s.defaultApplyTarget);
+      }
     });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listIterm2Profiles()
+      .then((profiles) => {
+        if (!cancelled) {
+          setIterm2Profiles(profiles.map((p) => p.name));
+        }
+      })
+      .catch(() => {
+        // 非 Tauri 环境（测试）或 iTerm2 目录不可用时忽略，下拉显示空
+      });
     return () => {
       cancelled = true;
     };
@@ -549,12 +598,19 @@ export default function WallpaperTool() {
   }
 
   async function handleApply(item: WallpaperItem) {
+    if (applyTarget === "iterm2" && !settings?.iterm2Profile) {
+      setShowSettings(true);
+      setStatus("未选择 iTerm2 目标 Profile，请在上方设置中选择后再应用");
+      return;
+    }
     setApplyingId(item.id);
     setStatus(null);
     try {
       const path = await downloadWallpaper(item);
-      const result = await applyWallpaperToGhosty(path);
-      setStatus(`已下载并应用：${result.imagePath}。${result.reloadMessage}`);
+      const result = await applyWallpaper(path, applyTarget, settings?.iterm2Profile);
+      setStatus(
+        `已下载并应用到 ${result.target === "iterm2" ? "iTerm2" : "cmux"}：${result.imagePath}。${result.reloadMessage}`,
+      );
     } catch (e) {
       setStatus(`应用失败：${String(e)}`);
     } finally {
@@ -644,7 +700,7 @@ export default function WallpaperTool() {
   return (
     <ToolPage
       title="壁纸工具"
-      description="从 wallhaven / Danbooru / Safebooru 搜索壁纸，下载并应用到 cmux 终端背景"
+      description="从 wallhaven / Danbooru / Safebooru 搜索壁纸，下载并应用到 cmux 或 iTerm2 终端背景"
     >
       <div className="mb-3 flex items-center justify-between">
         <div className="flex gap-2">
@@ -715,6 +771,39 @@ export default function WallpaperTool() {
               placeholder="~/.config/cmux/wallpapers"
               className={inputClass}
             />
+          </label>
+          <label className="block text-sm">
+            默认应用目标
+            <select
+              value={settings.defaultApplyTarget}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  defaultApplyTarget: e.target.value as ApplyWallpaperTarget,
+                })
+              }
+              className={inputClass}
+            >
+              <option value="cmux">cmux（ghosty 配置）</option>
+              <option value="iterm2">iTerm2</option>
+            </select>
+          </label>
+          <label className="block text-sm">
+            iTerm2 目标 Profile（应用目标为 iTerm2 时使用）
+            <select
+              value={settings.iterm2Profile}
+              onChange={(e) =>
+                setSettings({ ...settings, iterm2Profile: e.target.value })
+              }
+              className={inputClass}
+            >
+              <option value="">请选择 Profile</option>
+              {iterm2Profiles.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
           </label>
           <button
             onClick={() => void handleSaveSettings()}
@@ -964,16 +1053,22 @@ export default function WallpaperTool() {
                 <span className="text-gray-500">
                   {item.width}×{item.height}
                 </span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void handleApply(item);
-                  }}
-                  disabled={applyingId === item.id}
-                  className="rounded-md bg-blue-600 px-2 py-0.5 text-white disabled:opacity-50"
-                >
-                  {applyingId === item.id ? "应用中..." : "下载并应用"}
-                </button>
+                <div className="flex items-center gap-1">
+                  <TargetSelect
+                    value={applyTarget}
+                    onChange={setApplyTarget}
+                  />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleApply(item);
+                    }}
+                    disabled={applyingId === item.id}
+                    className="rounded-md bg-blue-600 px-2 py-0.5 text-white disabled:opacity-50"
+                  >
+                    {applyingId === item.id ? "应用中..." : "下载并应用"}
+                  </button>
+                </div>
               </div>
             </div>
           ))}
@@ -994,7 +1089,7 @@ export default function WallpaperTool() {
 
       {!searching && !status && !errors.length && items.length === 0 && (
         <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
-          搜索壁纸以预览，点击「下载并应用」设置 cmux 背景
+          搜索壁纸以预览，点击「下载并应用」设置终端背景
         </div>
       )}
 
@@ -1104,6 +1199,7 @@ export default function WallpaperTool() {
             <span className="text-gray-300">
               {getSourceMeta(previewItem.source)?.label ?? previewItem.source}
             </span>
+            <TargetSelect value={applyTarget} onChange={setApplyTarget} />
             <button
               onClick={() => void handleApply(previewItem)}
               disabled={applyingId === previewItem.id}
@@ -1111,7 +1207,11 @@ export default function WallpaperTool() {
             >
               {applyingId === previewItem.id ? "应用中..." : "下载并应用"}
             </button>
-            {status && <span className="text-xs text-gray-300">{status}</span>}
+            {status && (
+              <span className="max-w-64 text-xs text-amber-300">
+                {status}
+              </span>
+            )}
           </div>
         </div>
       )}

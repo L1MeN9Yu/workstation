@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import WallpaperTool from "./wallpaper";
 import {
-  applyWallpaperToGhosty,
+  applyWallpaper,
   downloadWallpaper,
   loadWallpaperSettings,
   previewWallpaper,
@@ -12,6 +12,7 @@ import {
   searchWallpapers,
   type WallpaperItem,
 } from "../../lib/wallpaper";
+import { listIterm2Profiles } from "../../lib/iterm2Config";
 
 const { readyCallbackRef } = vi.hoisted(() => ({
   readyCallbackRef: { current: () => {} },
@@ -22,6 +23,10 @@ vi.mock("@tauri-apps/api/event", () => ({
     readyCallbackRef.current = cb;
     return Promise.resolve(() => {});
   }),
+}));
+
+vi.mock("../../lib/iterm2Config", () => ({
+  listIterm2Profiles: vi.fn(),
 }));
 
 vi.mock("../../lib/wallpaper", () => ({
@@ -45,7 +50,7 @@ vi.mock("../../lib/wallpaper", () => ({
   selectionsToBits: (selected: string[], groups: { key: string }[]) =>
     groups.map((g) => (selected.includes(g.key) ? "1" : "0")).join(""),
   generateSeed: vi.fn(() => "mockedseed1234"),
-  applyWallpaperToGhosty: vi.fn(),
+  applyWallpaper: vi.fn(),
   downloadWallpaper: vi.fn(),
   loadWallpaperSettings: vi.fn(),
   previewWallpaper: vi.fn(),
@@ -85,9 +90,15 @@ describe("WallpaperTool", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(listIterm2Profiles).mockResolvedValue([
+      { name: "work.json", path: "/dir/work.json", content: "{}" },
+      { name: "home.json", path: "/dir/home.json", content: "{}" },
+    ]);
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
       proxy: "http://127.0.0.1:7890",
       downloadDir: "",
+      defaultApplyTarget: "cmux",
+      iterm2Profile: "",
       sources: {
         wallhaven: {
           apiKey: "",
@@ -462,8 +473,9 @@ describe("WallpaperTool", () => {
       },
     ]);
     vi.mocked(downloadWallpaper).mockResolvedValue("/wall/abc.jpg");
-    vi.mocked(applyWallpaperToGhosty).mockResolvedValue({
+    vi.mocked(applyWallpaper).mockResolvedValue({
       imagePath: "/wall/abc.jpg",
+      target: "cmux",
       reloadMessage: "配置已重新加载，cmux 已生效",
     });
     await flush();
@@ -481,8 +493,272 @@ describe("WallpaperTool", () => {
     expect(downloadWallpaper).toHaveBeenCalledWith(
       expect.objectContaining({ id: "wallhaven-abc" }),
     );
-    expect(applyWallpaperToGhosty).toHaveBeenCalledWith("/wall/abc.jpg");
-    expect(container.textContent).toContain("已下载并应用");
+    expect(applyWallpaper).toHaveBeenCalledWith("/wall/abc.jpg", "cmux", "");
+    expect(container.textContent).toContain("已下载并应用到 cmux");
+  });
+
+  /** 单次应用目标下拉 */
+  function findTargetSelect(): HTMLSelectElement {
+    return container.querySelector(
+      'select[aria-label="应用目标"]',
+    ) as HTMLSelectElement;
+  }
+
+  /** 通过原生 setter 修改受控 select 并派发 change */
+  async function selectOption(
+    select: HTMLSelectElement,
+    value: string,
+  ): Promise<void> {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+
+  it("switching target for one apply does not change the persisted default", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-abc",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "dddddddddddddddd",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    vi.mocked(downloadWallpaper).mockResolvedValue("/wall/abc.jpg");
+    vi.mocked(applyWallpaper).mockResolvedValue({
+      imagePath: "/wall/abc.jpg",
+      target: "iterm2",
+      reloadMessage: "iTerm2 已重新加载配置",
+    });
+    vi.mocked(loadWallpaperSettings).mockResolvedValue({
+      proxy: "",
+      downloadDir: "",
+      defaultApplyTarget: "cmux",
+      iterm2Profile: "work.json",
+      sources: {
+        wallhaven: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "",
+        },
+        danbooru: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "",
+        },
+        safebooru: {
+          apiKey: "",
+          login: "",
+          categories: "",
+          purity: "",
+          minWidth: "1920",
+          minHeight: "",
+          rating: "",
+          seed: "",
+          ratios: "",
+        },
+      },
+    });
+    act(() => {
+      root.unmount();
+    });
+    root = setup(container);
+    await flush();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const searchBtn = buttons.find((b) => b.textContent === "搜索")!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    await selectOption(findTargetSelect(), "iterm2");
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    const applyBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "下载并应用",
+    )!;
+    await act(async () => {
+      applyBtn.click();
+    });
+    expect(applyWallpaper).toHaveBeenCalledWith(
+      "/wall/abc.jpg",
+      "iterm2",
+      "work.json",
+    );
+    const settingsBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "设置")!;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    const targetLabel = Array.from(
+      container.querySelectorAll("label"),
+    ).find((l) => l.textContent?.includes("默认应用目标"))!;
+    expect(
+      (targetLabel.querySelector("select") as HTMLSelectElement).value,
+    ).toBe("cmux");
+  });
+
+  it("applies to iterm2 when the stored default target is iterm2", async () => {
+    vi.mocked(loadWallpaperSettings).mockResolvedValue({
+      proxy: "",
+      downloadDir: "",
+      defaultApplyTarget: "iterm2",
+      iterm2Profile: "work.json",
+      sources: {
+        wallhaven: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "",
+        },
+        danbooru: {
+          apiKey: "",
+          login: "",
+          categories: "010",
+          purity: "100",
+          minWidth: "1920",
+          minHeight: "1080",
+          rating: "safe",
+          seed: "",
+          ratios: "",
+        },
+        safebooru: {
+          apiKey: "",
+          login: "",
+          categories: "",
+          purity: "",
+          minWidth: "1920",
+          minHeight: "",
+          rating: "",
+          seed: "",
+          ratios: "",
+        },
+      },
+    });
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-abc",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "dddddddddddddddd",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    vi.mocked(downloadWallpaper).mockResolvedValue("/wall/it.jpg");
+    vi.mocked(applyWallpaper).mockResolvedValue({
+      imagePath: "/wall/it.jpg",
+      target: "iterm2",
+      reloadMessage: "iTerm2 已重新加载配置",
+    });
+    act(() => {
+      root.unmount();
+    });
+    root = setup(container);
+    await flush();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const searchBtn = buttons.find((b) => b.textContent === "搜索")!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    expect(findTargetSelect().value).toBe("iterm2");
+    const applyBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "下载并应用",
+    )!;
+    await act(async () => {
+      applyBtn.click();
+    });
+    expect(applyWallpaper).toHaveBeenCalledWith(
+      "/wall/it.jpg",
+      "iterm2",
+      "work.json",
+    );
+    expect(container.textContent).toContain("已下载并应用到 iTerm2");
+  });
+
+  it("prompts to pick an iterm2 profile when none is configured", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-abc",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "dddddddddddddddd",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    await flush();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const searchBtn = buttons.find((b) => b.textContent === "搜索")!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    await selectOption(findTargetSelect(), "iterm2");
+    const applyBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "下载并应用",
+    )!;
+    await act(async () => {
+      applyBtn.click();
+    });
+    expect(downloadWallpaper).not.toHaveBeenCalled();
+    expect(applyWallpaper).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("未选择 iTerm2 目标 Profile");
+    expect(container.textContent).toContain("统一设置");
+    expect(container.textContent).toContain("请选择 Profile");
+  });
+
+  it("shows failure message when applyWallpaper errors", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-abc",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "dddddddddddddddd",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    vi.mocked(downloadWallpaper).mockResolvedValue("/wall/x.jpg");
+    vi.mocked(applyWallpaper).mockRejectedValue(new Error("reload boom"));
+    await flush();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const searchBtn = buttons.find((b) => b.textContent === "搜索")!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    const applyBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "下载并应用",
+    )!;
+    await act(async () => {
+      applyBtn.click();
+    });
+    expect(container.textContent).toContain("应用失败");
+    expect(container.textContent).toContain("reload boom");
   });
 
   it("shows failure message when apply errors", async () => {
@@ -538,6 +814,79 @@ describe("WallpaperTool", () => {
       }),
     );
     expect(container.textContent).toContain("设置已保存");
+  });
+
+  it("settings panel renders apply target and iterm2 profile selects with loaded profiles", async () => {
+    await flush();
+    const settingsBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "设置")!;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    const labels = Array.from(container.querySelectorAll("label"));
+    const targetLabel = labels.find((l) =>
+      l.textContent?.includes("默认应用目标"),
+    )!;
+    expect(
+      (targetLabel.querySelector("select") as HTMLSelectElement).value,
+    ).toBe("cmux");
+    const profileLabel = labels.find((l) =>
+      l.textContent?.includes("iTerm2 目标 Profile"),
+    )!;
+    const options = Array.from(profileLabel.querySelectorAll("option")).map(
+      (o) => o.value,
+    );
+    expect(options).toEqual(["", "work.json", "home.json"]);
+  });
+
+  it("saves changed apply target and profile via settings panel", async () => {
+    await flush();
+    const settingsBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "设置")!;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    const labels = Array.from(container.querySelectorAll("label"));
+    const targetLabel = labels.find((l) =>
+      l.textContent?.includes("默认应用目标"),
+    )!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(targetLabel.querySelector("select"), "iterm2");
+      targetLabel
+        .querySelector("select")!
+        .dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const profileLabel = labels.find((l) =>
+      l.textContent?.includes("iTerm2 目标 Profile"),
+    )!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(profileLabel.querySelector("select"), "home.json");
+      profileLabel
+        .querySelector("select")!
+        .dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const saveBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "保存设置",
+    )!;
+    await act(async () => {
+      saveBtn.click();
+    });
+    expect(saveWallpaperProxy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultApplyTarget: "iterm2",
+        iterm2Profile: "home.json",
+      }),
+    );
   });
 
   it("exposes the selected source settings outside the settings panel", async () => {
@@ -682,6 +1031,8 @@ describe("WallpaperTool", () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
       proxy: "",
       downloadDir: "",
+      defaultApplyTarget: "cmux",
+      iterm2Profile: "",
       sources: {
         wallhaven: {
           apiKey: "",
@@ -736,6 +1087,8 @@ describe("WallpaperTool", () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
       proxy: "",
       downloadDir: "",
+      defaultApplyTarget: "cmux",
+      iterm2Profile: "",
       sources: {
         wallhaven: {
           apiKey: "",
@@ -805,6 +1158,8 @@ describe("WallpaperTool", () => {
     vi.mocked(loadWallpaperSettings).mockResolvedValue({
       proxy: "",
       downloadDir: "",
+      defaultApplyTarget: "cmux",
+      iterm2Profile: "",
       sources: {
         wallhaven: {
           apiKey: "",
@@ -1004,8 +1359,9 @@ describe("WallpaperTool", () => {
     it("点击卡片上的「下载并应用」不打开预览", async () => {
       vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
       vi.mocked(downloadWallpaper).mockResolvedValue("/wall/a.jpg");
-      vi.mocked(applyWallpaperToGhosty).mockResolvedValue({
+      vi.mocked(applyWallpaper).mockResolvedValue({
         imagePath: "/wall/a.jpg",
+        target: "cmux",
         reloadMessage: "ok",
       });
       vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
@@ -1183,8 +1539,9 @@ describe("WallpaperTool", () => {
     it("查看器内「下载并应用」成功与失败，且不关闭预览", async () => {
       vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
       vi.mocked(downloadWallpaper).mockResolvedValue("/wall/preview.jpg");
-      vi.mocked(applyWallpaperToGhosty).mockResolvedValue({
+      vi.mocked(applyWallpaper).mockResolvedValue({
         imagePath: "/wall/preview.jpg",
+        target: "cmux",
         reloadMessage: "已生效",
       });
       const dialog = await openLightbox();
@@ -1195,8 +1552,12 @@ describe("WallpaperTool", () => {
       expect(downloadWallpaper).toHaveBeenCalledWith(
         expect.objectContaining({ id: "wallhaven-preview" }),
       );
-      expect(applyWallpaperToGhosty).toHaveBeenCalledWith("/wall/preview.jpg");
-      expect(dialog.textContent).toContain("已下载并应用");
+      expect(applyWallpaper).toHaveBeenCalledWith(
+        "/wall/preview.jpg",
+        "cmux",
+        "",
+      );
+      expect(dialog.textContent).toContain("已下载并应用到 cmux");
       expect(dialog.textContent).toContain("已生效");
       expect(container.querySelector('[role="dialog"]')).not.toBeNull();
 
