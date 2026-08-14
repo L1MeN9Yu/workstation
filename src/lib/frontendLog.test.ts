@@ -21,7 +21,7 @@ describe("frontendLog", () => {
   beforeEach(() => {
     vi.useRealTimers();
     vi.resetModules();
-    delete window.__TAURI__;
+    delete window.__TAURI_INTERNALS__;
     vi.restoreAllMocks();
   });
 
@@ -47,7 +47,7 @@ describe("frontendLog", () => {
 
   it("proxies console.error and emits batched payload", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
 
     expect(mod.initFrontendLogging()).toBe(true);
@@ -75,7 +75,7 @@ describe("frontendLog", () => {
 
   it("still calls the original console method when proxied", async () => {
     mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -87,7 +87,7 @@ describe("frontendLog", () => {
 
   it("formats Error objects with stack and multiple args", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -102,7 +102,7 @@ describe("frontendLog", () => {
 
   it("falls back to String() when JSON.stringify throws on circular objects", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -117,7 +117,7 @@ describe("frontendLog", () => {
 
   it("falls back to String() when Error has no stack", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -135,7 +135,7 @@ describe("frontendLog", () => {
       throw new Error("emit failed");
     });
     vi.doMock("@tauri-apps/api/event", () => ({ emit: emitMock }));
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -146,7 +146,7 @@ describe("frontendLog", () => {
 
   it("flushes immediately when batch reaches 20 entries", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -162,7 +162,7 @@ describe("frontendLog", () => {
   it("flushes after the debounce interval via timer", async () => {
     vi.useFakeTimers();
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -177,7 +177,7 @@ describe("frontendLog", () => {
 
   it("captures window error events as error level", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -189,7 +189,7 @@ describe("frontendLog", () => {
 
   it("captures unhandledrejection reasons", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -204,7 +204,7 @@ describe("frontendLog", () => {
 
   it("does not forward info/debug by default", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging();
 
@@ -215,7 +215,7 @@ describe("frontendLog", () => {
 
   it("forwards info/debug when includeDebug is enabled", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
     mod.initFrontendLogging({ includeDebug: true });
 
@@ -229,7 +229,7 @@ describe("frontendLog", () => {
 
   it("init is idempotent and does not double-proxy", async () => {
     const { emitMock } = mockEventModule();
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     const mod = await loadFrontendLog();
 
     expect(mod.initFrontendLogging()).toBe(true);

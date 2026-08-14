@@ -20,14 +20,14 @@ import {
 
 describe("updater lib", () => {
   beforeEach(() => {
-    delete window.__TAURI__;
+    delete window.__TAURI_INTERNALS__;
     invokeMock.mockReset();
     vi.restoreAllMocks();
   });
 
   it("isTauriRuntime detects the Tauri runtime", () => {
     expect(isTauriRuntime()).toBe(false);
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     expect(isTauriRuntime()).toBe(true);
   });
 
@@ -37,14 +37,14 @@ describe("updater lib", () => {
   });
 
   it("currentAppVersion invokes app_version inside Tauri runtime", async () => {
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     invokeMock.mockResolvedValue("1.2.3");
     expect(await currentAppVersion()).toBe("1.2.3");
     expect(invokeMock).toHaveBeenCalledWith("app_version");
   });
 
   it("currentAppVersion falls back to null when invoke fails", async () => {
-    Object.defineProperty(window, "__TAURI__", { value: {}, configurable: true });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     invokeMock.mockRejectedValue(new Error("not available"));
     expect(await currentAppVersion()).toBeNull();
   });
