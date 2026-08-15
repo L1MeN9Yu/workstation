@@ -234,6 +234,14 @@ describe("WallpaperTool", () => {
       }),
     );
     expect(container.textContent).toContain("1920×1080");
+    const card = container.querySelector(".overflow-hidden.rounded-lg")!;
+    const actionBar = Array.from(card.querySelectorAll("div")).find(
+      (d) =>
+        d.className.includes("flex-wrap") &&
+        d.textContent?.includes("下载并应用"),
+    )!;
+    expect(actionBar.className).toContain("flex-wrap");
+    expect(actionBar.className).toContain("gap-y-1");
   });
 
   it("renders thumb via protocol url", async () => {
@@ -1732,6 +1740,10 @@ describe("WallpaperTool", () => {
       const option = dialog.querySelector("option")!;
       expect(option.className).toContain("bg-gray-900");
       expect(option.className).toContain("text-white");
+      const bar = select.parentElement!;
+      expect(bar.className).toContain("flex-wrap");
+      expect(bar.className).toContain("justify-center");
+      expect(bar.className).toContain("gap-y-1");
     });
   });
 
@@ -1761,6 +1773,8 @@ describe("WallpaperTool", () => {
       expect(
         libButtons.find((b) => b.textContent === "wallhaven"),
       ).toBeUndefined();
+      // 本地壁纸库视图不显示图源参数面板
+      expect(container.textContent).not.toContain("wallhaven 参数");
 
       const buttons2 = Array.from(container.querySelectorAll("button"));
       const back = buttons2.find((b) => b.textContent === "在线搜索")!;
@@ -1773,6 +1787,8 @@ describe("WallpaperTool", () => {
       expect(
         searchButtons.find((b) => b.textContent === "wallhaven"),
       ).toBeDefined();
+      // 切回搜索视图后参数面板恢复显示
+      expect(container.textContent).toContain("wallhaven 参数");
     });
   });
 });
