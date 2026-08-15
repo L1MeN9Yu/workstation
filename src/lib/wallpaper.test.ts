@@ -9,16 +9,25 @@ import {
   applyWallpaperToGhosty,
   applyWallpaperToIt,
   bitsToSelections,
+  deleteLocalWallpapers,
   downloadWallpaper,
+  fetchWallpaperThumb,
+  formatFileSize,
+  formatModifiedTime,
   generateSeed,
+  listLocalWallpapers,
   loadWallpaperSettings,
   previewWallpaper,
+  readLocalWallpaperFile,
   saveWallpaperProxy,
   saveWallpaperSources,
   searchWallpapers,
   selectionsToBits,
+  sortByModifiedDesc,
   thumbUrl,
+  type LocalWallpaperInfo,
   type WallpaperItem,
+  type WallpaperSettings,
 } from "./wallpaper";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -552,6 +561,113 @@ describe("wallpaper", () => {
 
     it("returns different values across calls", () => {
       expect(generateSeed()).not.toBe(generateSeed());
+    });
+  });
+
+  describe("本地壁纸库", () => {
+    it("listLocalWallpapers invokes list_local_wallpapers with settings", async () => {
+      mockedInvoke.mockResolvedValue([
+        {
+          fileName: "a.png",
+          absolutePath: "/w/a.png",
+          sizeBytes: 100,
+          modifiedAtMs: 1000,
+          thumbDataUrl: "data:image/jpeg;base64,x",
+        },
+      ]);
+      const settings: WallpaperSettings = {
+        downloadDir: "/w",
+        defaultApplyTarget: "cmux",
+        iterm2Profile: "",
+        sources: {},
+      };
+      const items = await listLocalWallpapers(settings);
+      expect(invoke).toHaveBeenCalledWith("list_local_wallpapers", {
+        settings,
+      });
+      expect(items[0].fileName).toBe("a.png");
+    });
+
+    it("listLocalWallpapers invokes without settings when omitted", async () => {
+      mockedInvoke.mockResolvedValue([]);
+      await listLocalWallpapers();
+      expect(invoke).toHaveBeenCalledWith("list_local_wallpapers", { settings: undefined });
+    });
+
+    it("listLocalWallpapers propagates invoke failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("boom"));
+      await expect(listLocalWallpapers()).rejects.toThrow("boom");
+    });
+
+    it("readLocalWallpaperFile invokes with the path", async () => {
+      mockedInvoke.mockResolvedValue("data:image/png;base64,abc");
+      const url = await readLocalWallpaperFile("/w/a.png");
+      expect(invoke).toHaveBeenCalledWith("read_local_wallpaper_file", {
+        path: "/w/a.png",
+      });
+      expect(url).toBe("data:image/png;base64,abc");
+    });
+
+    it("fetchWallpaperThumb invokes with the path", async () => {
+      mockedInvoke.mockResolvedValue("data:image/jpeg;base64,thumb");
+      const url = await fetchWallpaperThumb("/w/a.png");
+      expect(invoke).toHaveBeenCalledWith("wallpaper_thumb", {
+        path: "/w/a.png",
+      });
+      expect(url).toBe("data:image/jpeg;base64,thumb");
+    });
+
+    it("fetchWallpaperThumb propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("no file"));
+      await expect(fetchWallpaperThumb("/w/nope.png")).rejects.toThrow("no file");
+    });
+
+    it("readLocalWallpaperFile propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("missing"));
+      await expect(readLocalWallpaperFile("/w/nope.png")).rejects.toThrow("missing");
+    });
+
+    it("deleteLocalWallpapers invokes with the path list", async () => {
+      mockedInvoke.mockResolvedValue({ deleted: ["/w/a.png"], errors: [] });
+      const result = await deleteLocalWallpapers(["/w/a.png"]);
+      expect(invoke).toHaveBeenCalledWith("delete_local_wallpapers", {
+        paths: ["/w/a.png"],
+      });
+      expect(result.deleted).toEqual(["/w/a.png"]);
+    });
+
+    it("deleteLocalWallpapers propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("io"));
+      await expect(deleteLocalWallpapers(["/w/a.png"])).rejects.toThrow("io");
+    });
+
+    it("formatFileSize formats bytes units", () => {
+      expect(formatFileSize(0)).toBe("0 B");
+      expect(formatFileSize(512)).toBe("512 B");
+      expect(formatFileSize(1024)).toBe("1.0 KB");
+      expect(formatFileSize(1536)).toBe("1.5 KB");
+      expect(formatFileSize(2 * 1024 * 1024)).toBe("2.0 MB");
+      expect(formatFileSize(3 * 1024 * 1024 * 1024)).toBe("3.0 GB");
+    });
+
+    it("formatModifiedTime formats epoch ms to local time", () => {
+      const d = new Date(1_700_000_000_000);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const expected = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(
+        d.getDate(),
+      )} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      expect(formatModifiedTime(1_700_000_000_000)).toBe(expected);
+    });
+
+    it("sortByModifiedDesc sorts newest first without mutating input", () => {
+      const items: LocalWallpaperInfo[] = [
+        { fileName: "old", modifiedAtMs: 100, sizeBytes: 0, absolutePath: "/a", thumbDataUrl: "" },
+        { fileName: "new", modifiedAtMs: 300, sizeBytes: 0, absolutePath: "/b", thumbDataUrl: "" },
+        { fileName: "mid", modifiedAtMs: 200, sizeBytes: 0, absolutePath: "/c", thumbDataUrl: "" },
+      ];
+      const sorted = sortByModifiedDesc(items);
+      expect(sorted.map((i) => i.fileName)).toEqual(["new", "mid", "old"]);
+      expect(items.map((i) => i.fileName)).toEqual(["old", "new", "mid"]);
     });
   });
 });

@@ -17,7 +17,10 @@ use crate::{
     },
     read_cmux_config_at, read_config as read_config_impl, read_ghosty_config_at,
     reload_cmux_config_impl,
-    wallpaper::{self, SearchQuery, SourceSettings, ThumbState, WallpaperItem, WallpaperSettings},
+    wallpaper::{
+        self, DeleteWallpapersResult, LocalWallpaperInfo, SearchQuery, SourceSettings, ThumbState,
+        WallpaperItem, WallpaperSettings,
+    },
     write_cmux_config_at, write_config as write_config_impl, write_ghosty_config_at,
     CmuxConfigFile, CmuxReloadStatus,
 };
@@ -239,6 +242,54 @@ pub async fn fetch_full_image(item: WallpaperItem) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn list_local_wallpapers(settings: Option<WallpaperSettings>) -> Vec<LocalWallpaperInfo> {
+    let dir = wallpaper::wallpapers_dir(&settings.unwrap_or_else(wallpaper_settings_from_config));
+    tauri::async_runtime::spawn_blocking(move || {
+        wallpaper::list_local_wallpapers_with(&dir, wallpaper::local_wallpaper_entries, |_| None)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn wallpaper_thumb(path: String) -> Result<String, String> {
+    let path_buf = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        let (size, modified) = std::fs::metadata(&path_buf)
+            .map(|m| {
+                let modified_ms = m
+                    .modified()
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                (m.len(), modified_ms)
+            })
+            .unwrap_or((0, 0));
+        wallpaper::cached_thumbnail_data_url(&path_buf, size, modified, 400)
+            .ok_or_else(|| "cannot decode wallpaper thumbnail".to_string())
+    })
+    .await
+    .map_err(|e| format!("wallpaper thumb task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn read_local_wallpaper_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        wallpaper::read_local_wallpaper_file(PathBuf::from(path).as_path())
+    })
+    .await
+    .map_err(|e| format!("wallpaper preview task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn delete_local_wallpapers(paths: Vec<String>) -> DeleteWallpapersResult {
+    wallpaper::delete_local_wallpapers_with(&paths, |p| fs::remove_file(p))
+}
+
+#[tauri::command]
 pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
     let dir = app
         .path()
@@ -352,6 +403,10 @@ pub fn run() {
             search_wallpapers,
             download_wallpaper,
             fetch_full_image,
+            list_local_wallpapers,
+            wallpaper_thumb,
+            read_local_wallpaper_file,
+            delete_local_wallpapers,
             open_log_dir
         ])
         .run(tauri::generate_context!())

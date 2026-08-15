@@ -6,6 +6,7 @@ use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::{StreamExt, TryStreamExt};
+use image::GenericImageView;
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -507,6 +508,203 @@ pub fn full_image_data_url(bytes: &[u8], mime: &str) -> String {
     )
 }
 
+/// 本地壁纸目录中的一张壁纸文件信息。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalWallpaperInfo {
+    pub file_name: String,
+    pub absolute_path: String,
+    pub size_bytes: u64,
+    pub modified_at_ms: u64,
+    pub thumb_data_url: String,
+}
+
+/// 解析壁纸下载目录：优先用 settings.download_dir，否则默认 `~/.config/cmux/wallpapers/`。
+pub fn wallpapers_dir(settings: &WallpaperSettings) -> PathBuf {
+    settings
+        .download_dir
+        .as_ref()
+        .filter(|d| !d.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_download_dir)
+}
+
+pub const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "bmp"];
+
+pub fn is_image_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    IMAGE_EXTS
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
+pub fn local_wallpaper_entries(dir: &Path) -> Vec<LocalWallpaperEntry> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            if !meta.is_file() || !is_image_file_name(&entry.file_name().to_string_lossy()) {
+                return None;
+            }
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            Some(LocalWallpaperEntry {
+                path: entry.path(),
+                size_bytes: meta.len(),
+                modified_ms,
+            })
+        })
+        .collect()
+}
+
+pub struct LocalWallpaperEntry {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub modified_ms: u64,
+}
+
+/// 缩略图内存缓存：`(路径, 修改时间, 文件大小) -> data URL`，文件未变化时复用，
+/// 避免每次进入本地壁纸库都重新解码大图。
+use std::sync::{LazyLock, Mutex};
+
+type ThumbCacheKey = (String, u64, u64);
+type ThumbCache = HashMap<ThumbCacheKey, String>;
+
+static THUMB_CACHE: LazyLock<Mutex<ThumbCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const THUMB_CACHE_MAX: usize = 256;
+
+fn thumb_cache_get(key: &ThumbCacheKey) -> Option<String> {
+    THUMB_CACHE.lock().ok()?.get(key).cloned()
+}
+
+fn thumb_cache_insert(key: ThumbCacheKey, value: String) {
+    let mut guard = THUMB_CACHE.lock().unwrap();
+    if guard.len() >= THUMB_CACHE_MAX && !guard.contains_key(&key) {
+        if let Some(oldest) = guard.keys().next().cloned() {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert(key, value);
+}
+
+fn thumb_cache_key(path: &Path, size_bytes: u64, modified_ms: u64) -> ThumbCacheKey {
+    (path.display().to_string(), size_bytes, modified_ms)
+}
+
+/// 生成缩略图 data URL：解码图片并缩放到最大边不超过 `max_edge` 像素，
+/// 编码为 JPEG data URL；解码/编码失败或文件缺失返回 None（占位缩略图）。
+pub fn thumbnail_data_url(path: &Path, max_edge: u32) -> Option<String> {
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let img = reader.decode().ok()?;
+    let (width, height) = img.dimensions();
+    let longest = width.max(height);
+    let thumb = if longest <= max_edge {
+        img
+    } else {
+        let scale = max_edge as f64 / longest as f64;
+        let new_width = ((width as f64 * scale).round() as u32).max(1);
+        let new_height = ((height as f64 * scale).round() as u32).max(1);
+        img.resize(new_width, new_height, image::imageops::FilterType::Triangle)
+    };
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    thumb.write_to(&mut cursor, image::ImageFormat::Jpeg).ok()?;
+    Some(full_image_data_url(&buf, "image/jpeg"))
+}
+
+/// 带内存缓存的缩略图生成：命中缓存（路径+修改时间+大小未变）直接返回，
+/// 未命中则生成并写入缓存。生成失败不缓存。
+pub fn cached_thumbnail_data_url(
+    path: &Path,
+    size_bytes: u64,
+    modified_ms: u64,
+    max_edge: u32,
+) -> Option<String> {
+    let key = thumb_cache_key(path, size_bytes, modified_ms);
+    if let Some(url) = thumb_cache_get(&key) {
+        return Some(url);
+    }
+    let url = thumbnail_data_url(path, max_edge)?;
+    thumb_cache_insert(key, url.clone());
+    Some(url)
+}
+
+/// 清理缩略图内存缓存（测试与目录变更时使用）。
+pub fn clear_thumb_cache() {
+    let _ = THUMB_CACHE.lock().map(|mut g| g.clear());
+}
+
+/// 列出本地壁纸目录中的壁纸文件（按修改时间倒序），供 tauri 命令注入实现。
+/// `read_entries` 读取目录条目，`thumb_fn` 为每个文件生成缩略图 data URL（失败返回 None 以占位）。
+pub fn list_local_wallpapers_with(
+    dir: &Path,
+    read_entries: impl Fn(&Path) -> Vec<LocalWallpaperEntry>,
+    thumb_fn: impl Fn(&Path) -> Option<String>,
+) -> Vec<LocalWallpaperInfo> {
+    let mut entries = read_entries(dir);
+    entries.sort_by_key(|e| std::cmp::Reverse(e.modified_ms));
+    entries
+        .into_iter()
+        .map(|e| LocalWallpaperInfo {
+            file_name: e
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            absolute_path: e.path.display().to_string(),
+            size_bytes: e.size_bytes,
+            modified_at_ms: e.modified_ms,
+            thumb_data_url: thumb_fn(&e.path).unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// 读取本地图片文件字节并生成 data URL（大图预览用）。
+pub fn read_local_wallpaper_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("cannot read wallpaper file: {e}"))?;
+    let mime = match image::guess_format(&bytes) {
+        Ok(image::ImageFormat::Png) => "image/png",
+        Ok(image::ImageFormat::WebP) => "image/webp",
+        Ok(image::ImageFormat::Gif) => "image/gif",
+        Ok(_) => "image/jpeg",
+        Err(_) => "image/jpeg",
+    };
+    Ok(full_image_data_url(&bytes, mime))
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWallpapersResult {
+    pub deleted: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// 逐个删除本地壁纸文件并汇总结果：单个失败不影响其余文件。
+pub fn delete_local_wallpapers_with(
+    paths: &[String],
+    remove_file: impl Fn(&Path) -> std::io::Result<()>,
+) -> DeleteWallpapersResult {
+    let mut result = DeleteWallpapersResult::default();
+    for p in paths {
+        let path = PathBuf::from(p);
+        match remove_file(&path) {
+            Ok(()) => result.deleted.push(p.clone()),
+            Err(e) => result.errors.push(format!("{p}: {e}")),
+        }
+    }
+    result
+}
+
 fn default_download_dir_from(home: Option<PathBuf>) -> PathBuf {
     home.map(|d| d.join(".config").join("cmux").join("wallpapers"))
         .unwrap_or_else(|| PathBuf::from("."))
@@ -759,6 +957,7 @@ impl ThumbState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2382,5 +2581,331 @@ mod tests {
             mime_from_content_type("application/octet-stream"),
             "image/jpeg"
         );
+    }
+
+    fn write_png(path: &Path, width: u32, height: u32) {
+        use image::ImageEncoder;
+        let mut buf = Vec::new();
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([10, 20, 30]));
+        image::codecs::png::PngEncoder::new(&mut buf)
+            .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        fs::write(path, buf).unwrap();
+    }
+
+    fn set_mtime(path: &Path, millis: u64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis);
+        let _ = filetime::set_file_mtime(path, filetime::FileTime::from_system_time(t));
+    }
+
+    #[test]
+    fn is_image_file_name_matches_known_extensions_case_insensitively() {
+        assert!(is_image_file_name("wallhaven-123.jpg"));
+        assert!(is_image_file_name("photo.JPEG"));
+        assert!(is_image_file_name("pic.png"));
+        assert!(is_image_file_name("anim.webp"));
+        assert!(is_image_file_name("anim.gif"));
+        assert!(is_image_file_name("bitmap.bmp"));
+        assert!(!is_image_file_name("notes.txt"));
+        assert!(!is_image_file_name("archive.zip"));
+        assert!(!is_image_file_name("wallpaper.jpg.bak"));
+        assert!(!is_image_file_name("noext"));
+    }
+
+    #[test]
+    fn wallpapers_dir_prefers_settings_download_dir() {
+        let settings = WallpaperSettings {
+            download_dir: Some("  /custom/dir  ".to_string()),
+            ..WallpaperSettings::default()
+        };
+        assert_eq!(wallpapers_dir(&settings), PathBuf::from("  /custom/dir  "));
+    }
+
+    #[test]
+    fn wallpapers_dir_falls_back_to_default_when_unset_or_empty() {
+        let empty = WallpaperSettings {
+            download_dir: Some("   ".to_string()),
+            ..WallpaperSettings::default()
+        };
+        assert_eq!(wallpapers_dir(&empty), default_download_dir());
+        assert_eq!(
+            wallpapers_dir(&WallpaperSettings::default()),
+            default_download_dir()
+        );
+    }
+
+    #[test]
+    fn local_wallpaper_entries_lists_only_image_files() {
+        let dir = temp_cache_dir("local-entries");
+        let img = dir.join("a.png");
+        let txt = dir.join("b.txt");
+        write_png(&img, 8, 8);
+        fs::write(&txt, "hi").unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        let entries = local_wallpaper_entries(&dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, img);
+        assert_eq!(entries[0].size_bytes, fs::metadata(&img).unwrap().len());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_wallpaper_entries_missing_dir_returns_empty() {
+        let dir = temp_cache_dir("local-entries-missing").join("nope");
+        assert!(local_wallpaper_entries(&dir).is_empty());
+    }
+
+    #[test]
+    fn local_wallpaper_entries_reads_modified_time() {
+        let dir = temp_cache_dir("local-entries-mtime");
+        let img = dir.join("c.png");
+        write_png(&img, 8, 8);
+        set_mtime(&img, 1_700_000_000_000);
+        let entries = local_wallpaper_entries(&dir);
+        assert_eq!(entries[0].modified_ms, 1_700_000_000_000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_local_wallpapers_with_sorts_by_modified_desc_and_builds_info() {
+        let dir = temp_cache_dir("local-list");
+        let older = dir.join("older.png");
+        let newer = dir.join("newer.png");
+        write_png(&older, 8, 8);
+        write_png(&newer, 8, 8);
+        set_mtime(&older, 1_600_000_000_000);
+        set_mtime(&newer, 1_700_000_000_000);
+        let result = list_local_wallpapers_with(&dir, local_wallpaper_entries, |p| {
+            if p.file_name().unwrap() == "older.png" {
+                None
+            } else {
+                Some("data:image/jpeg;base64,abc".to_string())
+            }
+        });
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].file_name, "newer.png");
+        assert_eq!(result[0].thumb_data_url, "data:image/jpeg;base64,abc");
+        assert_eq!(result[1].file_name, "older.png");
+        assert_eq!(result[1].thumb_data_url, "");
+        assert!(result[0].absolute_path.contains("newer.png"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_local_wallpapers_with_empty_dir_returns_empty() {
+        let dir = temp_cache_dir("local-list-empty").join("empty");
+        let result = list_local_wallpapers_with(&dir, local_wallpaper_entries, |_| None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn thumbnail_data_url_scales_down_large_image() {
+        let dir = temp_cache_dir("local-thumb-large");
+        let img = dir.join("big.png");
+        write_png(&img, 1600, 800);
+        let url = thumbnail_data_url(&img, 400).unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"));
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(url.split(',').nth(1).unwrap())
+            .unwrap();
+        let loaded = image::load_from_memory(&decoded).unwrap();
+        assert_eq!(loaded.width(), 400);
+        assert_eq!(loaded.height(), 200);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_data_url_keeps_small_image_unchanged() {
+        let dir = temp_cache_dir("local-thumb-small");
+        let img = dir.join("small.png");
+        write_png(&img, 100, 50);
+        let url = thumbnail_data_url(&img, 400).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(url.split(',').nth(1).unwrap())
+            .unwrap();
+        let loaded = image::load_from_memory(&decoded).unwrap();
+        assert_eq!(loaded.width(), 100);
+        assert_eq!(loaded.height(), 50);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_data_url_returns_none_for_missing_or_invalid_file() {
+        let dir = temp_cache_dir("local-thumb-invalid");
+        let missing = dir.join("missing.png");
+        assert!(thumbnail_data_url(&missing, 400).is_none());
+        let broken = dir.join("broken.png");
+        fs::write(&broken, "not an image").unwrap();
+        assert!(thumbnail_data_url(&broken, 400).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_local_wallpaper_file_returns_png_data_url() {
+        let dir = temp_cache_dir("local-read");
+        let img = dir.join("read.png");
+        write_png(&img, 8, 8);
+        let url = read_local_wallpaper_file(&img).unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_local_wallpaper_file_missing_returns_error() {
+        let dir = temp_cache_dir("local-read-missing");
+        let err = read_local_wallpaper_file(&dir.join("nope.png")).unwrap_err();
+        assert!(err.contains("cannot read wallpaper file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_local_wallpaper_file_unknown_format_falls_back_to_jpeg() {
+        let dir = temp_cache_dir("local-read-unknown");
+        let img = dir.join("unknown.jpg");
+        fs::write(&img, "some bytes").unwrap();
+        let url = read_local_wallpaper_file(&img).unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_local_wallpaper_file_returns_webp_gif_and_other_data_urls() {
+        use image::codecs::gif::GifEncoder;
+        use image::codecs::webp::WebPEncoder;
+        use image::ImageEncoder;
+        let dir = temp_cache_dir("local-read-formats");
+
+        let webp = dir.join("anim.webp");
+        let mut webp_buf = Vec::new();
+        let img = image::RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]));
+        WebPEncoder::new_lossless(&mut webp_buf)
+            .write_image(img.as_raw(), 4, 4, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        fs::write(&webp, &webp_buf).unwrap();
+        let url = read_local_wallpaper_file(&webp).unwrap();
+        assert!(url.starts_with("data:image/webp;base64,"));
+
+        let gif = dir.join("anim.gif");
+        let mut gif_buf = Vec::new();
+        {
+            let mut gif_enc = GifEncoder::new(&mut gif_buf);
+            gif_enc
+                .encode(img.as_raw(), 4, 4, image::ExtendedColorType::Rgb8)
+                .unwrap();
+        }
+        fs::write(&gif, &gif_buf).unwrap();
+        let url = read_local_wallpaper_file(&gif).unwrap();
+        assert!(url.starts_with("data:image/gif;base64,"));
+
+        let jpg = dir.join("photo.jpg");
+        let mut jpg_buf = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpg_buf)
+            .encode(img.as_raw(), 4, 4, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        fs::write(&jpg, &jpg_buf).unwrap();
+        let url = read_local_wallpaper_file(&jpg).unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_local_wallpapers_with_reports_each_result() {
+        let dir = temp_cache_dir("local-delete");
+        let a = dir.join("a.png");
+        let b = dir.join("b.png");
+        write_png(&a, 4, 4);
+        write_png(&b, 4, 4);
+        let paths = vec![a.display().to_string(), b.display().to_string()];
+        let result = delete_local_wallpapers_with(&paths, |p| fs::remove_file(p));
+        assert_eq!(result.deleted.len(), 2);
+        assert!(result.errors.is_empty());
+        assert!(!a.exists());
+        assert!(!b.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_local_wallpapers_with_partial_failure_keeps_others() {
+        let dir = temp_cache_dir("local-delete-partial");
+        let a = dir.join("a.png");
+        let missing = dir.join("missing.png");
+        write_png(&a, 4, 4);
+        let paths = vec![a.display().to_string(), missing.display().to_string()];
+        let result = delete_local_wallpapers_with(&paths, |p| fs::remove_file(p));
+        assert_eq!(result.deleted, vec![a.display().to_string()]);
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("missing.png"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_local_wallpapers_with_all_fail_and_empty_list() {
+        let dir = temp_cache_dir("local-delete-fail");
+        let paths = vec![dir.join("x.png").display().to_string()];
+        let result = delete_local_wallpapers_with(&paths, |p| fs::remove_file(p));
+        assert!(result.deleted.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        let empty = delete_local_wallpapers_with(&[], |p| fs::remove_file(p));
+        assert!(empty.deleted.is_empty());
+        assert!(empty.errors.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_thumbnail_data_url_reuses_cache_entry() {
+        clear_thumb_cache();
+        let dir = temp_cache_dir("local-cache");
+        let img = dir.join("cached.png");
+        write_png(&img, 8, 8);
+        let size = fs::metadata(&img).unwrap().len();
+        let modified = 1_700_000_000_000;
+        let first = cached_thumbnail_data_url(&img, size, modified, 400).unwrap();
+        let second = cached_thumbnail_data_url(&img, size, modified, 400).unwrap();
+        assert_eq!(first, second);
+        assert!(first.starts_with("data:image/jpeg;base64,"));
+        clear_thumb_cache();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_thumbnail_data_url_evicts_oldest_beyond_capacity() {
+        clear_thumb_cache();
+        let dir = temp_cache_dir("local-cache-cap");
+        for i in 0..(THUMB_CACHE_MAX + 5) {
+            let img = dir.join(format!("cap-{i}.png"));
+            write_png(&img, 4, 4);
+            let size = fs::metadata(&img).unwrap().len();
+            let url = cached_thumbnail_data_url(&img, size, i as u64, 400).unwrap();
+            assert!(!url.is_empty());
+        }
+        {
+            let guard = THUMB_CACHE.lock().unwrap();
+            assert!(guard.len() <= THUMB_CACHE_MAX);
+        }
+        clear_thumb_cache();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_thumbnail_data_url_does_not_cache_failures() {
+        clear_thumb_cache();
+        let dir = temp_cache_dir("local-cache-fail");
+        let missing = dir.join("nope.png");
+        let url = cached_thumbnail_data_url(&missing, 0, 0, 400);
+        assert!(url.is_none());
+        {
+            let guard = THUMB_CACHE.lock().unwrap();
+            assert!(guard.is_empty());
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumb_cache_key_uses_path_size_and_mtime() {
+        let key = thumb_cache_key(Path::new("/w/a.png"), 100, 200);
+        assert_eq!(key, ("/w/a.png".to_string(), 100, 200));
+        let other = thumb_cache_key(Path::new("/w/a.png"), 101, 200);
+        assert_ne!(key, other);
     }
 }
