@@ -5,6 +5,7 @@ import {
   writeIterm2Profile,
   type Iterm2ProfileFile,
 } from "../lib/iterm2Config";
+import { confirmDialog } from "../lib/confirm";
 import Iterm2ConfigForm from "../components/Iterm2ConfigForm";
 
 export default function Iterm2Config() {
@@ -15,7 +16,6 @@ export default function Iterm2Config() {
   const [nameError, setNameError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
 
   // 保存成功提示展示一段时间后自动消失（外部修改导致表单重挂载后提示由父层保留）。
@@ -86,11 +86,8 @@ export default function Iterm2Config() {
   }
 
   async function handleDelete(name: string) {
-    if (confirming !== name) {
-      setConfirming(name);
-      return;
-    }
-    setConfirming(null);
+    const ok = await confirmDialog(`确认删除 profile ${name}？此操作不可恢复。`);
+    if (!ok) return;
     setDeleting(name);
     setError(null);
     try {
@@ -142,7 +139,6 @@ export default function Iterm2Config() {
                 >
                   <button
                     onClick={() => {
-                      setConfirming(null);
                       setSelected(p);
                     }}
                     className={`block min-w-0 flex-1 truncate rounded-md px-3 py-2 text-left text-sm ${
@@ -156,18 +152,10 @@ export default function Iterm2Config() {
                   <button
                     onClick={() => void handleDelete(p.name)}
                     disabled={deleting !== null}
-                    title={
-                      confirming === p.name
-                        ? `再次点击确认删除 ${p.name}`
-                        : `删除 ${p.name}`
-                    }
-                    className={`mr-1 shrink-0 rounded-md px-1.5 py-1 text-xs ${
-                      confirming === p.name
-                        ? "bg-red-600 font-medium text-white hover:bg-red-700"
-                        : "text-red-500 hover:bg-red-50 dark:hover:bg-red-950"
-                    } disabled:opacity-50`}
+                    title={`删除 ${p.name}`}
+                    className="mr-1 shrink-0 rounded-md px-1.5 py-1 text-xs text-red-500 hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-950"
                   >
-                    {deleting === p.name ? "..." : confirming === p.name ? "确认？" : "删除"}
+                    {deleting === p.name ? "..." : "删除"}
                   </button>
                 </div>
               ))}

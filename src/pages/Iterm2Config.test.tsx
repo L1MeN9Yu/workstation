@@ -19,6 +19,12 @@ vi.mock("../lib/iterm2Config", async (importOriginal) => {
   };
 });
 
+vi.mock("../lib/confirm", () => ({
+  confirmDialog: vi.fn(),
+}));
+
+import { confirmDialog } from "../lib/confirm";
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const P1: Iterm2ProfileFile = {
@@ -66,6 +72,8 @@ describe("Iterm2Config", () => {
     vi.mocked(listIterm2Profiles).mockReset();
     vi.mocked(writeIterm2Profile).mockReset();
     vi.mocked(deleteIterm2Profile).mockReset();
+    vi.mocked(confirmDialog).mockReset();
+    vi.mocked(confirmDialog).mockResolvedValue(true);
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -210,28 +218,28 @@ describe("Iterm2Config", () => {
     expect(container.querySelector("div.mb-3.text-sm")).toBeNull();
   });
 
-  it("deletes a profile after two-step confirmation", async () => {
+  it("deletes a profile after dialog confirmation", async () => {
     vi.mocked(listIterm2Profiles).mockResolvedValueOnce([P1, P2]).mockResolvedValueOnce([P2]);
     vi.mocked(deleteIterm2Profile).mockResolvedValue(undefined);
     root = await renderPage(container);
     expect(container.textContent).toContain("删除");
     await clickButton(container, "删除");
-    expect(deleteIterm2Profile).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("确认？");
-    await clickButton(container, "确认？");
+    expect(confirmDialog).toHaveBeenCalledWith(
+      "确认删除 profile default.json？此操作不可恢复。",
+    );
     expect(deleteIterm2Profile).toHaveBeenCalledWith(P1.name);
     expect(listIterm2Profiles).toHaveBeenCalledTimes(2);
     expect(container.textContent).not.toContain(P1.path);
   });
 
-  it("cancels confirmation by selecting another profile", async () => {
+  it("does not delete when the dialog confirmation is cancelled", async () => {
     vi.mocked(listIterm2Profiles).mockResolvedValue([P1, P2]);
+    vi.mocked(confirmDialog).mockResolvedValue(false);
     root = await renderPage(container);
     await clickButton(container, "删除");
-    expect(container.textContent).toContain("确认？");
-    await clickButton(container, "work.json");
-    expect(container.textContent).not.toContain("确认？");
+    expect(confirmDialog).toHaveBeenCalled();
     expect(deleteIterm2Profile).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(P1.path);
   });
 
   it("shows an error when deleting a profile fails", async () => {
@@ -239,7 +247,6 @@ describe("Iterm2Config", () => {
     vi.mocked(deleteIterm2Profile).mockRejectedValue(new Error("locked"));
     root = await renderPage(container);
     await clickButton(container, "删除");
-    await clickButton(container, "确认？");
     expect(container.textContent).toContain("locked");
   });
 
@@ -253,7 +260,6 @@ describe("Iterm2Config", () => {
     );
     root = await renderPage(container);
     await clickButton(container, "删除");
-    await clickButton(container, "确认？");
     expect(container.textContent).toContain("...");
     await act(async () => {
       await new Promise((r) => setTimeout(r, 60));
