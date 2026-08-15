@@ -9,6 +9,7 @@ import { useGhostyKeys } from "./store/ghostyKeys";
 import { useIterm2Keys } from "./store/iterm2Keys";
 import { initUpdateCheck } from "./store/update";
 import { getGlobalProxy } from "./lib/proxy";
+import ToastHost from "./components/ToastHost";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -115,6 +116,7 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
+      <ToastHost />
     </div>
   );
 }

@@ -12,6 +12,9 @@ import {
 } from "../../lib/wallpaper";
 import { WallpaperTargetSelect } from "../../components/WallpaperTargetSelect";
 import { confirmDialog } from "../../lib/confirm";
+import { toast } from "../../lib/toast";
+import Alert from "../../components/Alert";
+import EmptyState from "../../components/EmptyState";
 
 interface WallpaperLibraryProps {
   applyTarget: ApplyWallpaperTarget;
@@ -100,7 +103,6 @@ export function WallpaperLibrary({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [applyingPath, setApplyingPath] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -180,19 +182,18 @@ export function WallpaperLibrary({
       return;
     }
     setBusy(true);
-    setNotice(null);
     try {
       const result = await deleteLocalWallpapers(paths);
       if (result.errors.length > 0) {
-        setNotice(
+        toast.warning(
           `删除完成：成功 ${result.deleted.length} 张，失败 ${result.errors.length} 张（${result.errors[0]}）`,
         );
       } else {
-        setNotice(`已删除 ${result.deleted.length} 张壁纸`);
+        toast.success(`已删除 ${result.deleted.length} 张壁纸`);
       }
       await load();
     } catch (e) {
-      setNotice(`删除失败：${String(e)}`);
+      toast.error(`删除失败：${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -204,14 +205,13 @@ export function WallpaperLibrary({
       return;
     }
     setApplyingPath(path);
-    setNotice(null);
     try {
       const result = await applyWallpaper(path, applyTarget, iterm2Profile);
-      setNotice(
+      toast.success(
         `已应用到 ${result.target === "iterm2" ? "iTerm2" : "cmux"}：${result.imagePath}。${result.reloadMessage}`,
       );
     } catch (e) {
-      setNotice(`应用失败：${String(e)}`);
+      toast.error(`应用失败：${String(e)}`);
     } finally {
       setApplyingPath(null);
     }
@@ -323,27 +323,12 @@ export function WallpaperLibrary({
         </div>
       </div>
 
-      {notice && (
-        <div className="mb-3 rounded-md border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200">
-          {notice}
-        </div>
-      )}
-
-      {error && (
-        <div
-          role="alert"
-          className="mb-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
-        >
-          加载本地壁纸失败：{error}
-        </div>
-      )}
+      {error && <Alert variant="error">加载本地壁纸失败：{error}</Alert>}
 
       {loading ? (
         <SkeletonGrid />
       ) : items.length === 0 ? (
-        <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
-          本地壁纸目录为空，先在搜索页下载壁纸吧
-        </div>
+        <EmptyState>本地壁纸目录为空，先在搜索页下载壁纸吧</EmptyState>
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
           {items.map((item, index) => (

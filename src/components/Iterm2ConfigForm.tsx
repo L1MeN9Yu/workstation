@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { findIterm2Key, validateIterm2Value, type Iterm2KeySpec } from "../lib/iterm2Keys";
+import { findIterm2Key, validateIterm2Value } from "../lib/iterm2Keys";
 import { useIterm2Keys } from "../store/iterm2Keys";
 import {
   arrayColorToHex,
@@ -11,8 +11,12 @@ import {
   reloadIterm2Config,
   reloadStatusMessage,
   writeIterm2Profile,
-  type Iterm2ReloadResult,
 } from "../lib/iterm2Config";
+import { toast } from "../lib/toast";
+import ConfigValueControl from "./ConfigValueControl";
+import Alert from "./Alert";
+import Button from "./Button";
+import EmptyState from "./EmptyState";
 
 interface Entry {
   key: string;
@@ -87,129 +91,6 @@ function parseContent(content: string): ParsedProfile {
   }
 }
 
-function enumOptions(spec: Iterm2KeySpec, current: string): string[] {
-  const options = [...(spec.enum ?? [])];
-  if (current && !options.includes(current)) options.push(current);
-  return options;
-}
-
-function ValueControl({
-  spec,
-  type,
-  value,
-  className,
-  onChange,
-  onKeyDown,
-}: {
-  spec: Iterm2KeySpec | undefined;
-  type: Iterm2ValueType;
-  value: string;
-  className: string;
-  onChange: (v: string) => void;
-  onKeyDown?: (e: React.KeyboardEvent) => void;
-}) {
-  if (type === "enum" && spec?.enum) {
-    return (
-      <select className={className} value={value} onChange={(ev) => onChange(ev.target.value)}>
-        {enumOptions(spec, value).map((v) => (
-          <option key={v} value={v}>
-            {v}
-          </option>
-        ))}
-      </select>
-    );
-  }
-  if (type === "bool") {
-    return (
-      <select className={className} value={value} onChange={(ev) => onChange(ev.target.value)}>
-        <option value="true">true</option>
-        <option value="false">false</option>
-      </select>
-    );
-  }
-  if (type === "yesno") {
-    return (
-      <select className={className} value={value} onChange={(ev) => onChange(ev.target.value)}>
-        <option value="Yes">Yes</option>
-        <option value="No">No</option>
-      </select>
-    );
-  }
-  if (type === "number") {
-    if (spec?.min !== undefined && spec.max !== undefined) {
-      const numeric = Number(value);
-      const rangeValue =
-        numeric >= spec.min && numeric <= spec.max
-          ? numeric
-          : numeric > spec.max
-            ? spec.max
-            : spec.min;
-      return (
-        <div className="flex flex-1 items-center gap-2">
-          <input
-            type="range"
-            className="min-w-0 flex-1 cursor-pointer"
-            min={spec.min}
-            max={spec.max}
-            step={0.01}
-            value={rangeValue}
-            onChange={(ev) => onChange(ev.target.value)}
-          />
-          <input
-            type="number"
-            className="w-24 shrink-0 rounded-md border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-sm dark:border-gray-700 dark:bg-gray-900"
-            value={value}
-            min={spec.min}
-            max={spec.max}
-            onChange={(ev) => onChange(ev.target.value)}
-            onKeyDown={onKeyDown}
-          />
-        </div>
-      );
-    }
-    return (
-      <input
-        type="number"
-        className={className}
-        value={value}
-        min={spec?.min}
-        max={spec?.max}
-        onChange={(ev) => onChange(ev.target.value)}
-        onKeyDown={onKeyDown}
-      />
-    );
-  }
-  if (type === "color") {
-    const pickerValue = /^#/.test(value.trim()) ? value.trim() : (arrayColorToHex(value) ?? "#000000");
-    return (
-      <div className="flex flex-1 items-center gap-2">
-        <input
-          type="color"
-          className="h-8 w-10 shrink-0 cursor-pointer rounded border border-gray-200 dark:border-gray-700"
-          value={pickerValue}
-          onChange={(ev) => onChange(ev.target.value)}
-        />
-        <input
-          className={className}
-          value={value}
-          placeholder={spec?.placeholder}
-          onChange={(ev) => onChange(ev.target.value)}
-          onKeyDown={onKeyDown}
-        />
-      </div>
-    );
-  }
-  return (
-    <input
-      className={className}
-      value={value}
-      placeholder={spec?.placeholder}
-      onChange={(ev) => onChange(ev.target.value)}
-      onKeyDown={onKeyDown}
-    />
-  );
-}
-
 export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
   const keys = useIterm2Keys((s) => s.keys);
 
@@ -238,11 +119,9 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
   }, [original]);
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
-  const [reloadResult, setReloadResult] = useState<Iterm2ReloadResult | null>(null);
 
   const categories = useMemo(() => {
     const order: string[] = [];
@@ -260,12 +139,10 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
       }
       return next;
     });
-    setStatus(null);
   }
 
   function removeEntry(index: number): void {
     setEntries((prev) => prev.filter((_, i) => i !== index));
-    setStatus(null);
   }
 
   function addEntry(): void {
@@ -287,14 +164,12 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
     ]);
     setNewKey("");
     setNewValue("");
-    setStatus(null);
     setError(null);
   }
 
   async function handleSave() {
     setSaving(true);
     setError(null);
-    setStatus(null);
     try {
       for (const e of entries) {
         const orig = original[e.key];
@@ -343,7 +218,7 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
           : JSON.stringify(obj, null, 2);
       await writeIterm2Profile(name, text);
       const message = `已保存（修改 ${modified} 项，删除 ${removed} 项）`;
-      setStatus(message);
+      toast.success(message);
       onSaved?.(message);
     } catch (e) {
       setError(String(e));
@@ -354,12 +229,15 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
 
   async function handleReload() {
     setReloading(true);
-    setReloadResult(null);
     try {
       const r = await reloadIterm2Config();
-      setReloadResult(r);
+      if (r.status === "success") {
+        toast.success(reloadStatusMessage(r));
+      } else {
+        toast.error(reloadStatusMessage(r));
+      }
     } catch (e) {
-      setReloadResult({ status: "failed", message: String(e) });
+      toast.error(String(e));
     } finally {
       setReloading(false);
     }
@@ -374,22 +252,16 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
 
   return (
     <div>
-      {error && (
-        <div className="mb-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
-          {error}
-        </div>
-      )}
+      {error && <Alert variant="error">{error}</Alert>}
 
       {parsed.kind === "profiles" && (parsed.rest?.length ?? 0) > 0 && (
-        <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
+        <Alert variant="warning">
           该文件包含 {(parsed.rest?.length ?? 0) + 1} 个 profile，当前仅编辑第一个，其余原样保留。
-        </div>
+        </Alert>
       )}
 
       {empty ? (
-        <div className="mb-3 flex h-32 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
-          暂无配置项，可在下方新增
-        </div>
+        <EmptyState className="mb-3 flex h-32">暂无配置项，可在下方新增</EmptyState>
       ) : (
         <div className="mb-3 space-y-2">
           {entries.map((e, i) => {
@@ -401,20 +273,21 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
                   {e.key}
                 </span>
                 <span className="text-gray-400">=</span>
-                <ValueControl
+                <ConfigValueControl
                   spec={spec}
                   type={e.type}
                   value={e.value}
                   className={inputClass}
                   onChange={(v) => updateEntry(i, { value: v })}
+                  colorValueToHex={arrayColorToHex}
                 />
-                <button
+                <Button
+                  variant="dangerText"
                   onClick={() => removeEntry(i)}
-                  className="shrink-0 rounded-md px-2 py-1 text-xs text-red-500 hover:bg-red-50 dark:hover:bg-red-950"
                   title="删除该配置项"
                 >
                   删除
-                </button>
+                </Button>
               </div>
             );
           })}
@@ -455,15 +328,11 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
               </optgroup>
             ))}
           </select>
-          <button
-            onClick={addEntry}
-            disabled={!newKey}
-            className="shrink-0 rounded-md bg-gray-200 px-3 py-1 text-sm text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
-          >
+          <Button variant="secondary" onClick={addEntry} disabled={!newKey}>
             新增
-          </button>
+          </Button>
         </div>
-        <ValueControl
+        <ConfigValueControl
           spec={newSpec}
           type={newType}
           value={newValue}
@@ -479,35 +348,15 @@ export default function Iterm2ConfigForm({ content, name, onSaved }: Props) {
       </div>
 
       <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="rounded-md bg-accent-600 px-4 py-1.5 text-sm text-white disabled:opacity-50"
-        >
+        <Button variant="primary" onClick={handleSave} disabled={saving}>
           {saving ? "保存中..." : "保存"}
-        </button>
-        {status && <span className="text-sm text-green-600 dark:text-green-400">{status}</span>}
+        </Button>
       </div>
 
       <div className="mt-3 flex items-center gap-3">
-        <button
-          onClick={handleReload}
-          disabled={reloading}
-          className="rounded-md bg-gray-200 px-4 py-1.5 text-sm text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
-        >
+        <Button variant="secondary" onClick={handleReload} disabled={reloading}>
           {reloading ? "重载中..." : "重新加载配置"}
-        </button>
-        {reloadResult && (
-          <span
-            className={`text-sm ${
-              reloadResult.status === "success"
-                ? "text-green-600 dark:text-green-400"
-                : "text-amber-600 dark:text-amber-400"
-            }`}
-          >
-            {reloadStatusMessage(reloadResult)}
-          </span>
-        )}
+        </Button>
       </div>
     </div>
   );

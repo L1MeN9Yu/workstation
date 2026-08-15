@@ -44,7 +44,12 @@ vi.mock("../../lib/confirm", () => ({
   confirmDialog: vi.fn(),
 }));
 
+vi.mock("../../lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
+}));
+
 import { confirmDialog } from "../../lib/confirm";
+import { toast } from "../../lib/toast";
 
 const ITEM_A: LocalWallpaperInfo = {
   fileName: "a.png",
@@ -208,7 +213,8 @@ describe("WallpaperLibrary", () => {
     );
     await flush();
     expect(deleteLocalWallpapers).toHaveBeenCalledWith(["/w/a.png"]);
-    expect(container.textContent).toContain("已删除 1 张壁纸");
+    expect(toast.success).toHaveBeenCalledWith("已删除 1 张壁纸");
+    expect(container.textContent).not.toContain("已删除 1 张壁纸");
     expect(vi.mocked(listLocalWallpapers)).toHaveBeenCalledTimes(2);
   });
 
@@ -252,7 +258,9 @@ describe("WallpaperLibrary", () => {
       del.click();
     });
     await flush();
-    expect(container.textContent).toContain("失败 1 张");
+    expect(toast.warning).toHaveBeenCalledWith(
+      "删除完成：成功 1 张，失败 1 张（/w/b.jpg: EACCES）",
+    );
   });
 
   it("shows delete error when invoke rejects", async () => {
@@ -272,7 +280,7 @@ describe("WallpaperLibrary", () => {
       del.click();
     });
     await flush();
-    expect(container.textContent).toContain("删除失败：Error: io error");
+    expect(toast.error).toHaveBeenCalledWith("删除失败：Error: io error");
   });
 
   it("select all toggles every wallpaper", async () => {
@@ -314,7 +322,10 @@ describe("WallpaperLibrary", () => {
     expect(container.textContent).toContain("应用中...");
     await flush();
     expect(applyWallpaper).toHaveBeenCalledWith("/w/a.png", "cmux", "");
-    expect(container.textContent).toContain("已应用到 cmux");
+    expect(toast.success).toHaveBeenCalledWith(
+      "已应用到 cmux：/w/a.png。已重载",
+    );
+    expect(container.textContent).not.toContain("已应用到 cmux");
     const card = container.querySelector(".overflow-hidden.rounded-lg")!;
     const select = card.querySelector('select[aria-label="应用目标"]')!;
     const actionRow = select.parentElement!;
@@ -353,7 +364,8 @@ describe("WallpaperLibrary", () => {
       applyBtn.click();
     });
     await flush();
-    expect(container.textContent).toContain("应用失败：Error: ghosty missing");
+    expect(toast.error).toHaveBeenCalledWith("应用失败：Error: ghosty missing");
+    expect(container.textContent).not.toContain("应用失败");
   });
 
   it("opens preview dialog with data url and closes on ✕", async () => {
