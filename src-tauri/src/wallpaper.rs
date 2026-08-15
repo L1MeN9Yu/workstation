@@ -193,15 +193,17 @@ async fn search_wallhaven(
                 pairs.append_pair("seed", seed.trim());
             }
         }
-        for r in src
+        let joined = src
             .ratios
             .as_deref()
             .into_iter()
             .flat_map(|s| s.split(','))
             .map(str::trim)
             .filter(|r| !r.is_empty())
-        {
-            pairs.append_pair("ratios", r);
+            .collect::<Vec<_>>()
+            .join(",");
+        if !joined.is_empty() {
+            pairs.append_pair("ratios", &joined);
         }
         let kw = query.keywords.trim();
         if !kw.is_empty() {
@@ -1348,9 +1350,32 @@ mod tests {
             .unwrap();
         let lines = server.request_lines();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("ratios=16x9"), "got: {}", lines[0]);
-        assert!(lines[0].contains("ratios=21x9"), "got: {}", lines[0]);
-        assert!(lines[0].contains("ratios=32x9"), "got: {}", lines[0]);
+        assert_eq!(lines[0].matches("ratios=").count(), 1, "got: {}", lines[0]);
+        let request = &lines[0];
+        assert!(request.contains("ratios=16x9%2C21x9%2C32x9"));
+    }
+
+    #[test]
+    fn search_wallhaven_joins_ratios_ignoring_spaces_and_empty() {
+        let server = MockServer::ok(r#"{"data":[]}"#);
+        let client = build_client(None).unwrap();
+        let query = SearchQuery {
+            source: "wallhaven".to_string(),
+            keywords: String::new(),
+            random: false,
+            ..Default::default()
+        };
+        let src = SourceSettings {
+            ratios: Some("16x9, , 16x10".to_string()),
+            ..SourceSettings::default()
+        };
+        tauri::async_runtime::block_on(search_wallhaven(&client, &query, &src, &server.base_url()))
+            .unwrap();
+        let lines = server.request_lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].matches("ratios=").count(), 1, "got: {}", lines[0]);
+        let request = &lines[0];
+        assert!(request.contains("ratios=16x9%2C16x10"));
     }
 
     #[test]
