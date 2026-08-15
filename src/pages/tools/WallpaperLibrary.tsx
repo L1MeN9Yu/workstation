@@ -365,7 +365,7 @@ export function WallpaperLibrary({
                   <button
                     onClick={() => void handleApply(item.absolutePath)}
                     disabled={applyingPath === item.absolutePath}
-                    className="rounded-md bg-blue-600 px-2 py-0.5 text-white disabled:opacity-50"
+                    className="rounded-md bg-accent-600 px-2 py-0.5 text-white disabled:opacity-50"
                   >
                     {applyingPath === item.absolutePath ? "应用中..." : "应用"}
                   </button>
