@@ -383,7 +383,7 @@ export function WallpaperLibrary({
                   {formatFileSize(item.sizeBytes)} ·{" "}
                   {formatModifiedTime(item.modifiedAtMs)}
                 </div>
-                <div className="flex items-center justify-between gap-1">
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
                   <WallpaperTargetSelect
                     value={applyTarget}
                     onChange={onApplyTargetChange}

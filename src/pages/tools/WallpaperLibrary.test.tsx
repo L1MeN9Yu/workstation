@@ -315,6 +315,11 @@ describe("WallpaperLibrary", () => {
     await flush();
     expect(applyWallpaper).toHaveBeenCalledWith("/w/a.png", "cmux", "");
     expect(container.textContent).toContain("已应用到 cmux");
+    const card = container.querySelector(".overflow-hidden.rounded-lg")!;
+    const select = card.querySelector('select[aria-label="应用目标"]')!;
+    const actionRow = select.parentElement!;
+    expect(actionRow.className).toContain("flex-wrap");
+    expect(actionRow.className).toContain("gap-y-1");
   });
 
   it("apply fails without iterm2 profile and notifies to open settings", async () => {

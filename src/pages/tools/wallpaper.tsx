@@ -847,7 +847,7 @@ export default function WallpaperTool() {
         </div>
       )}
 
-      {settings && meta && (
+      {view === "search" && settings && meta && (
         <div className="mb-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
           <div className="mb-2 text-sm font-medium">{meta.label} 参数</div>
           {(() => {
@@ -1087,7 +1087,7 @@ export default function WallpaperTool() {
                 alt={item.id}
                 className="h-32 w-full"
               />
-              <div className="flex items-center justify-between p-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 p-2 text-xs">
                 <span className="text-gray-500">
                   {item.width}×{item.height}
                 </span>
@@ -1258,7 +1258,7 @@ export default function WallpaperTool() {
 
           {/* 底部信息栏：分辨率 / 图源 / 下载应用 */}
           <div
-            className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-md bg-gray-900/80 px-3 py-2 text-sm text-white shadow-lg"
+            className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-md bg-gray-900/80 px-3 py-2 text-sm text-white shadow-lg"
             onClick={(e) => e.stopPropagation()}
             onPointerDown={(e) => e.stopPropagation()}
           >
