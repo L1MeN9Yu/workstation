@@ -6,7 +6,11 @@ import {
   type Iterm2ProfileFile,
 } from "../lib/iterm2Config";
 import { confirmDialog } from "../lib/confirm";
+import { toast } from "../lib/toast";
 import Iterm2ConfigForm from "../components/Iterm2ConfigForm";
+import Alert from "../components/Alert";
+import Button from "../components/Button";
+import EmptyState from "../components/EmptyState";
 
 export default function Iterm2Config() {
   const [profiles, setProfiles] = useState<Iterm2ProfileFile[] | null>(null);
@@ -16,14 +20,6 @@ export default function Iterm2Config() {
   const [nameError, setNameError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [savedMessage, setSavedMessage] = useState<string | null>(null);
-
-  // 保存成功提示展示一段时间后自动消失（外部修改导致表单重挂载后提示由父层保留）。
-  useEffect(() => {
-    if (!savedMessage) return;
-    const timer = setTimeout(() => setSavedMessage(null), 4000);
-    return () => clearTimeout(timer);
-  }, [savedMessage]);
 
   async function refresh() {
     try {
@@ -78,6 +74,7 @@ export default function Iterm2Config() {
       setProfiles(list);
       setSelected(list.find((p) => p.name === name) ?? null);
       setNewName("");
+      toast.success(`已创建 ${name}`);
     } catch (e) {
       setNameError(String(e));
     } finally {
@@ -95,6 +92,7 @@ export default function Iterm2Config() {
       const list = await listIterm2Profiles();
       setProfiles(list);
       setSelected((cur) => (cur && cur.name === name ? (list[0] ?? null) : cur));
+      toast.success(`已删除 ${name}`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -109,16 +107,10 @@ export default function Iterm2Config() {
         管理 iTerm2 Dynamic Profiles，编辑保存后无需重启 iTerm2 即可生效。
       </p>
 
-      {error && (
-        <div className="mb-4 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
-          读取失败：{error}
-        </div>
-      )}
+      {error && <Alert variant="error">读取失败：{error}</Alert>}
 
       {profiles === null ? (
-        <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
-          加载中...
-        </div>
+        <EmptyState>加载中...</EmptyState>
       ) : (
         <div className="flex gap-4">
           <aside className="w-60 shrink-0">
@@ -149,14 +141,14 @@ export default function Iterm2Config() {
                   >
                     {p.name}
                   </button>
-                  <button
+                  <Button
+                    variant="dangerText"
                     onClick={() => void handleDelete(p.name)}
                     disabled={deleting !== null}
                     title={`删除 ${p.name}`}
-                    className="mr-1 shrink-0 rounded-md px-1.5 py-1 text-xs text-red-500 hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-950"
                   >
                     {deleting === p.name ? "..." : "删除"}
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
@@ -170,13 +162,14 @@ export default function Iterm2Config() {
                   if (e.key === "Enter") void handleCreate();
                 }}
               />
-              <button
+              <Button
+                variant="secondary"
                 onClick={handleCreate}
                 disabled={creating}
-                className="w-full rounded-md bg-gray-200 px-3 py-1 text-sm text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
+                className="w-full px-3 py-1"
               >
                 {creating ? "创建中..." : "新建 profile"}
-              </button>
+              </Button>
               {nameError && (
                 <div className="text-xs text-red-500 dark:text-red-400">{nameError}</div>
               )}
@@ -188,35 +181,28 @@ export default function Iterm2Config() {
               <div className="rounded-lg border border-gray-200 dark:border-gray-700">
                 <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
                   <span className="truncate text-xs text-gray-500">{selected.path}</span>
-                  <button
+                  <Button
+                    variant="secondary"
                     onClick={() => void refresh()}
-                    className="ml-3 shrink-0 rounded-md bg-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                    className="ml-3 px-2 py-1 text-xs hover:bg-gray-300 dark:hover:bg-gray-600"
                     title="从磁盘重新读取 profile 文件（同步 iTerm2 内的修改）"
                   >
                     读取
-                  </button>
+                  </Button>
                 </div>
                 <div className="p-4">
-                  {savedMessage && (
-                    <div className="mb-3 text-sm text-green-600 dark:text-green-400">
-                      {savedMessage}
-                    </div>
-                  )}
                   <Iterm2ConfigForm
                     key={`${selected.name}:${selected.content}`}
                     name={selected.name}
                     content={selected.content}
-                    onSaved={(message) => {
-                      setSavedMessage(message);
+                    onSaved={() => {
                       void refresh();
                     }}
                   />
                 </div>
               </div>
             ) : (
-              <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
-                暂无 profile 文件，可在左侧新建
-              </div>
+              <EmptyState>暂无 profile 文件，可在左侧新建</EmptyState>
             )}
           </main>
         </div>

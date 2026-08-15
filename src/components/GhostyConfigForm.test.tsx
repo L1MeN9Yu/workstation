@@ -5,6 +5,7 @@ import GhostyConfigForm from "./GhostyConfigForm";
 import { writeGhostyConfig } from "../lib/cmuxConfig";
 import { listSystemFonts } from "../lib/systemFonts";
 import { useSystemFonts } from "../store/systemFonts";
+import { toast } from "../lib/toast";
 
 vi.mock("../lib/cmuxConfig", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/cmuxConfig")>();
@@ -13,6 +14,10 @@ vi.mock("../lib/cmuxConfig", async (importOriginal) => {
 
 vi.mock("../lib/systemFonts", () => ({
   listSystemFonts: vi.fn(),
+}));
+
+vi.mock("../lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -220,11 +225,12 @@ opacity-thing = custom-text
     expect(writeGhostyConfig).toHaveBeenCalledWith("opacity-thing = x\n");
   });
 
-  it("shows error when write fails", async () => {
+  it("shows a save error toast when write fails", async () => {
     vi.mocked(writeGhostyConfig).mockRejectedValue(new Error("disk full"));
     root = mount(container);
     await clickButton(container, "保存");
-    expect(container.textContent).toContain("disk full");
+    expect(toast.error).toHaveBeenCalledWith("保存失败：Error: disk full");
+    expect(container.textContent).not.toContain("disk full");
   });
 
   it("shows empty state with no kv entries", () => {

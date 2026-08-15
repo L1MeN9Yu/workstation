@@ -13,7 +13,10 @@ import {
   type DirtyField,
 } from "../lib/cmuxJsonc";
 import { writeCmuxConfig } from "../lib/cmuxConfig";
+import { toast } from "../lib/toast";
 import ReloadConfigButton from "./ReloadConfigButton";
+import Alert from "./Alert";
+import Button from "./Button";
 
 const RENDER_SCHEMA = cmuxSchema as unknown as RJSFSchema;
 
@@ -143,7 +146,6 @@ export default function CmuxConfigForm({ content }: Props) {
   );
   const [renderFailed, setRenderFailed] = useState(false);
   const [textMode, setTextMode] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -165,11 +167,10 @@ export default function CmuxConfigForm({ content }: Props) {
   async function handleSave() {
     setSaving(true);
     setError(null);
-    setStatus(null);
     try {
       const dirty = collectDirty(initialData, formData, LEAF_PATHS);
       if (dirty.length === 0) {
-        setStatus("无变更");
+        toast.info("无变更");
         return;
       }
       const { text, errors } = mergeCmuxJsonc(content, dirty);
@@ -181,9 +182,9 @@ export default function CmuxConfigForm({ content }: Props) {
       const p = parseCmuxJsonc(text);
       setExplicitPaths(new Set(p.explicitPaths));
       setFormData({ ...p.json });
-      setStatus(`已保存 ${dirty.length} 项变更`);
+      toast.success(`已保存 ${dirty.length} 项变更`);
     } catch (e) {
-      setError(String(e));
+      toast.error(`保存失败：${String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -194,13 +195,13 @@ export default function CmuxConfigForm({ content }: Props) {
     setError(null);
     try {
       await writeCmuxConfig(textMode);
-      setStatus("已保存");
+      toast.success("已保存");
       setTextMode("");
       const p = parseCmuxJsonc(textMode);
       setExplicitPaths(new Set(p.explicitPaths));
       setFormData({ ...p.json });
     } catch (e) {
-      setError(String(e));
+      toast.error(`保存失败：${String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -212,23 +213,18 @@ export default function CmuxConfigForm({ content }: Props) {
         未显式配置的字段显示 schema 默认值，修改后才会写入文件。未设置项：{unsetCount} 个
       </p>
 
-      {error && (
-        <div className="mb-3 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
-          {error}
-        </div>
-      )}
+      {error && <Alert variant="error">{error}</Alert>}
 
       {renderFailed ? (
         <div>
-          <div className="mb-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          <Alert variant="warning" className="mb-2">
             表单渲染失败，已降级为文本编辑模式
-          </div>
+          </Alert>
           <textarea
             className="min-h-[320px] w-full rounded-lg border border-gray-200 bg-gray-50 p-3 font-mono text-sm dark:border-gray-700 dark:bg-gray-900"
             value={textMode || content}
             onChange={(e) => {
               setTextMode(e.target.value);
-              setStatus(null);
             }}
           />
         </div>
@@ -243,7 +239,6 @@ export default function CmuxConfigForm({ content }: Props) {
             templates={{ ObjectFieldTemplate: CollapsibleGroupTemplate }}
             onChange={(e) => {
               setFormData(e.formData as Record<string, unknown>);
-              setStatus(null);
             }}
           >
             <div />
@@ -252,14 +247,9 @@ export default function CmuxConfigForm({ content }: Props) {
       )}
 
       <div className="mt-4 flex items-center gap-3">
-        <button
-          onClick={renderFailed ? handleSaveText : handleSave}
-          disabled={saving}
-          className="rounded-md bg-accent-600 px-4 py-1.5 text-sm text-white disabled:opacity-50"
-        >
+        <Button variant="primary" onClick={renderFailed ? handleSaveText : handleSave} disabled={saving}>
           {saving ? "保存中..." : "保存"}
-        </button>
-        {status && <span className="text-sm text-green-600 dark:text-green-400">{status}</span>}
+        </Button>
       </div>
 
       <div className="mt-3">

@@ -24,7 +24,12 @@ vi.mock("../lib/confirm", () => ({
   confirmDialog: vi.fn(async () => true),
 }));
 
+vi.mock("../lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
+}));
+
 import { confirmDialog } from "../lib/confirm";
+import { toast } from "../lib/toast";
 
 // node 26 provides an experimental global localStorage that conflicts with
 // jsdom's; polyfill window.localStorage explicitly for tests.
@@ -233,10 +238,21 @@ describe("Settings update section", () => {
     const root = await renderPage(container, "应用更新");
     await clickButton(container, "检查更新");
     expect(container.textContent).toContain("network down");
+    expect(toast.error).toHaveBeenCalledWith("Error: network down");
     const retryBtn = [...container.querySelectorAll("button")].find(
       (b) => b.textContent === "重试下载",
     );
     expect(retryBtn).toBeDefined();
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows a fallback toast when the error has no message", async () => {
+    useUpdateStore.setState({ status: "error", errorMessage: null });
+    const root = await renderPage(container, "应用更新");
+    expect(toast.error).toHaveBeenCalledWith("检查更新失败");
+    expect(container.textContent).toContain("检查更新失败");
     await act(async () => {
       root.unmount();
     });
@@ -530,13 +546,14 @@ describe("Settings network proxy section", () => {
     expect(proxyModule.saveGlobalProxy).toHaveBeenCalledWith(
       "http://192.168.1.1:8080",
     );
-    expect(container.textContent).toContain("代理配置已保存");
+    expect(toast.success).toHaveBeenCalledWith("代理配置已保存");
+    expect(container.textContent).not.toContain("代理配置已保存");
     await act(async () => {
       root.unmount();
     });
   });
 
-  it("shows error message when saving invalid proxy", async () => {
+  it("shows a toast when saving invalid proxy", async () => {
     const proxyModule = await import("../lib/proxy");
     vi.mocked(proxyModule.getGlobalProxy).mockResolvedValue("");
     vi.mocked(proxyModule.saveGlobalProxy).mockRejectedValue(
@@ -544,7 +561,8 @@ describe("Settings network proxy section", () => {
     );
     const root = await renderPage(container, "网络代理");
     await clickButton(container, "保存");
-    expect(container.textContent).toContain("代理地址无效");
+    expect(toast.error).toHaveBeenCalledWith("Error: 代理地址无效");
+    expect(container.textContent).not.toContain("代理地址无效");
     await act(async () => {
       root.unmount();
     });

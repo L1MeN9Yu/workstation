@@ -3,11 +3,16 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import Iterm2ConfigForm from "./Iterm2ConfigForm";
 import { reloadIterm2Config, writeIterm2Profile } from "../lib/iterm2Config";
+import { toast } from "../lib/toast";
 
 vi.mock("../lib/iterm2Config", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/iterm2Config")>();
   return { ...actual, writeIterm2Profile: vi.fn(), reloadIterm2Config: vi.fn() };
 });
+
+vi.mock("../lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -110,6 +115,8 @@ describe("Iterm2ConfigForm", () => {
   beforeEach(() => {
     vi.mocked(writeIterm2Profile).mockReset();
     vi.mocked(reloadIterm2Config).mockReset();
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
   });
@@ -197,7 +204,8 @@ describe("Iterm2ConfigForm", () => {
         2,
       ),
     );
-    expect(container.textContent).toContain("已保存（修改 1 项，删除 0 项）");
+    expect(toast.success).toHaveBeenCalledWith("已保存（修改 1 项，删除 0 项）");
+    expect(container.textContent).not.toContain("已保存（修改");
     expect(onSaved).toHaveBeenCalledTimes(1);
   });
 
@@ -299,7 +307,7 @@ describe("Iterm2ConfigForm", () => {
       "default.json",
       expect.not.stringContaining("Name"),
     );
-    expect(container.textContent).toContain("已保存（修改 0 项，删除 1 项）");
+    expect(toast.success).toHaveBeenCalledWith("已保存（修改 0 项，删除 1 项）");
   });
 
   it("shows error and keeps form content when save fails", async () => {
@@ -311,41 +319,51 @@ describe("Iterm2ConfigForm", () => {
     expect(container.textContent).toContain("disk full");
     expect(number?.value).toBe("0.5");
     expect(writeIterm2Profile).toHaveBeenCalledTimes(1);
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
-  it("shows success message when reload succeeds", async () => {
+  it("shows a success toast when reload succeeds", async () => {
     vi.mocked(reloadIterm2Config).mockResolvedValue({ status: "success" });
     root = mount(container);
     await clickButton(container, "重新加载配置");
-    expect(container.textContent).toContain("iTerm2 已重新加载配置");
+    expect(toast.success).toHaveBeenCalledWith("iTerm2 已重新加载配置");
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("iTerm2 已重新加载配置");
   });
 
-  it("shows notRunning message when iTerm2 is not running", async () => {
+  it("shows an error toast when iTerm2 is not running", async () => {
     vi.mocked(reloadIterm2Config).mockResolvedValue({ status: "notRunning" });
     root = mount(container);
     await clickButton(container, "重新加载配置");
-    expect(container.textContent).toContain("iTerm2 未运行");
+    expect(toast.error).toHaveBeenCalledWith(
+      expect.stringContaining("iTerm2 未运行"),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
-  it("shows mechanismUnavailable message", async () => {
+  it("shows an error toast when mechanism is unavailable", async () => {
     vi.mocked(reloadIterm2Config).mockResolvedValue({ status: "mechanismUnavailable" });
     root = mount(container);
     await clickButton(container, "重新加载配置");
-    expect(container.textContent).toContain("刷新机制不可用");
+    expect(toast.error).toHaveBeenCalledWith(
+      expect.stringContaining("刷新机制不可用"),
+    );
   });
 
-  it("shows failed message with detail when reload fails", async () => {
+  it("shows an error toast with detail when reload fails", async () => {
     vi.mocked(reloadIterm2Config).mockResolvedValue({ status: "failed", message: "boom" });
     root = mount(container);
     await clickButton(container, "重新加载配置");
-    expect(container.textContent).toContain("boom");
+    expect(toast.error).toHaveBeenCalledWith(
+      expect.stringContaining("boom"),
+    );
   });
 
-  it("shows failed message when reload invoke rejects", async () => {
+  it("shows an error toast when reload invoke rejects", async () => {
     vi.mocked(reloadIterm2Config).mockRejectedValue(new Error("invoke error"));
     root = mount(container);
     await clickButton(container, "重新加载配置");
-    expect(container.textContent).toContain("invoke error");
+    expect(toast.error).toHaveBeenCalledWith("Error: invoke error");
   });
 
   it("passes the saved message to onSaved", async () => {
@@ -354,6 +372,7 @@ describe("Iterm2ConfigForm", () => {
     const number = container.querySelector<HTMLInputElement>('input[type="number"]');
     setInputValue(number!, "0.5");
     await clickButton(container, "保存");
+    expect(toast.success).toHaveBeenCalledWith("已保存（修改 1 项，删除 0 项）");
     expect(onSaved).toHaveBeenCalledWith("已保存（修改 1 项，删除 0 项）");
   });
 

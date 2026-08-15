@@ -10,6 +10,9 @@ import { listen } from "@tauri-apps/api/event";
 import { ToolPage } from "../ToolPage";
 import OpenLogDirButton from "../../components/OpenLogDirButton";
 import { WallpaperTargetSelect } from "../../components/WallpaperTargetSelect";
+import { toast } from "../../lib/toast";
+import EmptyState from "../../components/EmptyState";
+import Alert from "../../components/Alert";
 import { WallpaperLibrary } from "./WallpaperLibrary";
 import {
   BIT_GROUPS,
@@ -35,6 +38,7 @@ import {
   WALLPAPER_SOURCES,
   getSourceMeta,
 } from "../../lib/wallpaperSources";
+import { describeSearchError } from "../../lib/wallpaperErrors";
 
 interface SearchError {
   source: string;
@@ -278,7 +282,6 @@ export default function WallpaperTool() {
   const [searching, setSearching] = useState(false);
   const [items, setItems] = useState<WallpaperItem[]>([]);
   const [errors, setErrors] = useState<SearchError[]>([]);
-  const [status, setStatus] = useState<string | null>(null);
   const [settings, setSettings] = useState<WallpaperSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
@@ -526,8 +529,8 @@ export default function WallpaperTool() {
     saveTimerRef.current = window.setTimeout(() => {
       saveTimerRef.current = null;
       void saveWallpaperSources(sources)
-        .then(() => setStatus("参数已自动保存"))
-        .catch((e) => setStatus(`自动保存失败：${String(e)}`));
+        .then(() => toast.success("参数已自动保存"))
+        .catch((e) => toast.error(`自动保存失败：${String(e)}`));
     }, SOURCE_SAVE_DEBOUNCE_MS);
   }
 
@@ -566,7 +569,6 @@ export default function WallpaperTool() {
   async function runSearch(random: boolean, page: number): Promise<void> {
     if (!settings) return;
     setSearching(true);
-    setStatus(null);
     setErrors([]);
     try {
       const result = await searchWallpapers(
@@ -581,13 +583,13 @@ export default function WallpaperTool() {
       setItems((prev) => (page > 1 ? [...prev, ...result] : result));
       setHasMore(result.length > 0);
       if (result.length === 0 && page === 1) {
-        setStatus("没有找到满足条件的壁纸（分辨率需 ≥ 1920 宽）");
+        toast.info("没有找到匹配的壁纸，试试更换关键词或图源");
       }
     } catch (e) {
       if (page === 1) {
         setErrors([{ source, message: String(e) }]);
       } else {
-        setStatus(`加载更多失败：${String(e)}`);
+        toast.error(`加载更多失败：${String(e)}`);
       }
     } finally {
       setSearching(false);
@@ -609,19 +611,18 @@ export default function WallpaperTool() {
   async function handleApply(item: WallpaperItem) {
     if (applyTarget === "iterm2" && !settings?.iterm2Profile) {
       setShowSettings(true);
-      setStatus("未选择 iTerm2 目标 Profile，请在上方设置中选择后再应用");
+      toast.error("未选择 iTerm2 目标 Profile，请在上方设置中选择后再应用");
       return;
     }
     setApplyingId(item.id);
-    setStatus(null);
     try {
       const path = await downloadWallpaper(item);
       const result = await applyWallpaper(path, applyTarget, settings?.iterm2Profile);
-      setStatus(
+      toast.success(
         `已下载并应用到 ${result.target === "iterm2" ? "iTerm2" : "cmux"}：${result.imagePath}。${result.reloadMessage}`,
       );
     } catch (e) {
-      setStatus(`应用失败：${String(e)}`);
+      toast.error(`应用失败：${String(e)}`);
     } finally {
       setApplyingId(null);
     }
@@ -630,7 +631,7 @@ export default function WallpaperTool() {
   /** 本地库应用 iTerm2 但未配置 Profile 时：打开设置面板并提示 */
   function handleRequireProfile(): void {
     setShowSettings(true);
-    setStatus("未选择 iTerm2 目标 Profile，请在上方设置中选择后再应用");
+    toast.error("未选择 iTerm2 目标 Profile，请在上方设置中选择后再应用");
   }
 
   async function handleRefreshSeed() {
@@ -646,16 +647,15 @@ export default function WallpaperTool() {
       },
     };
     setSettings(updated);
-    setStatus(null);
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
     try {
       await saveWallpaperSources(updated.sources);
-      setStatus("seed 已刷新并保存");
+      toast.success("seed 已刷新并保存");
     } catch (e) {
-      setStatus(`保存 seed 失败：${String(e)}`);
+      toast.error(`保存 seed 失败：${String(e)}`);
     }
   }
 
@@ -663,10 +663,10 @@ export default function WallpaperTool() {
     if (!settings) return;
     try {
       await saveWallpaperProxy(settings);
-      setStatus("设置已保存");
+      toast.success("设置已保存");
       setShowSettings(false);
     } catch (e) {
-      setStatus(`保存设置失败：${String(e)}`);
+      toast.error(`保存设置失败：${String(e)}`);
     }
   }
 
@@ -757,7 +757,6 @@ export default function WallpaperTool() {
                 setSource(s.id);
                 setErrors([]);
                 setItems([]);
-                setStatus(null);
                 setHasMore(false);
                 pageRef.current = 1;
               }}
@@ -1058,19 +1057,10 @@ export default function WallpaperTool() {
       {errors.length > 0 && (
         <div className="mb-3 space-y-2">
           {errors.map((e) => (
-            <div
-              key={e.source}
-              className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
-            >
-              图源 {e.source} 搜索失败：{e.message}（wallhaven 需代理，请在设置中确认代理可用）
-            </div>
+            <Alert key={e.source} variant="error">
+              {describeSearchError(e.source, e.message)}
+            </Alert>
           ))}
-        </div>
-      )}
-
-      {status && (
-        <div className="mb-3 rounded-md border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200">
-          {status}
         </div>
       )}
 
@@ -1125,10 +1115,8 @@ export default function WallpaperTool() {
         </div>
       )}
 
-      {!searching && !status && !errors.length && items.length === 0 && (
-        <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
-          搜索壁纸以预览，点击「下载并应用」设置终端背景
-        </div>
+      {!searching && !errors.length && items.length === 0 && (
+        <EmptyState>搜索壁纸以预览，点击「下载并应用」设置终端背景</EmptyState>
       )}
 
       {previewItem && (
@@ -1276,11 +1264,6 @@ export default function WallpaperTool() {
             >
               {applyingId === previewItem.id ? "应用中..." : "下载并应用"}
             </button>
-            {status && (
-              <span className="max-w-64 text-xs text-amber-300">
-                {status}
-              </span>
-            )}
           </div>
         </div>
       )}

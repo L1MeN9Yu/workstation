@@ -23,7 +23,12 @@ vi.mock("../lib/confirm", () => ({
   confirmDialog: vi.fn(),
 }));
 
+vi.mock("../lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
+}));
+
 import { confirmDialog } from "../lib/confirm";
+import { toast } from "../lib/toast";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -74,12 +79,13 @@ describe("Iterm2Config", () => {
     vi.mocked(deleteIterm2Profile).mockReset();
     vi.mocked(confirmDialog).mockReset();
     vi.mocked(confirmDialog).mockResolvedValue(true);
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     if (root) {
       act(() => {
         root.unmount();
@@ -189,7 +195,7 @@ describe("Iterm2Config", () => {
     expect(container.textContent).toContain("read-only");
   });
 
-  it("refreshes the profile list and shows a saved message after save", async () => {
+  it("refreshes the profile list and shows a saved toast after save", async () => {
     vi.mocked(listIterm2Profiles)
       .mockResolvedValueOnce([P1])
       .mockResolvedValueOnce([{ ...P1, content: JSON.stringify({ Name: "Updated" }, null, 2) }]);
@@ -201,21 +207,8 @@ describe("Iterm2Config", () => {
       "default.json",
       JSON.stringify({ Name: "Default" }, null, 2),
     );
-    expect(container.textContent).toContain("已保存（修改 0 项，删除 0 项）");
-  });
-
-  it("clears the saved message after it times out", async () => {
-    vi.useFakeTimers();
-    vi.mocked(listIterm2Profiles).mockResolvedValue([P1]);
-    vi.mocked(writeIterm2Profile).mockResolvedValue(undefined);
-    root = await renderPage(container);
-    await clickButton(container, "保存");
-    const parentMsg = container.querySelector("div.mb-3.text-sm");
-    expect(parentMsg?.textContent).toContain("已保存（修改");
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4001);
-    });
-    expect(container.querySelector("div.mb-3.text-sm")).toBeNull();
+    expect(toast.success).toHaveBeenCalledWith("已保存（修改 0 项，删除 0 项）");
+    expect(container.textContent).not.toContain("已保存（修改");
   });
 
   it("deletes a profile after dialog confirmation", async () => {

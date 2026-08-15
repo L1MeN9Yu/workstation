@@ -14,6 +14,7 @@ import {
   type WallpaperItem,
 } from "../../lib/wallpaper";
 import { listIterm2Profiles } from "../../lib/iterm2Config";
+import { toast } from "../../lib/toast";
 
 const { readyCallbackRef } = vi.hoisted(() => ({
   readyCallbackRef: { current: () => {} },
@@ -24,6 +25,10 @@ vi.mock("@tauri-apps/api/event", () => ({
     readyCallbackRef.current = cb;
     return Promise.resolve(() => {});
   }),
+}));
+
+vi.mock("../../lib/toast", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
 }));
 
 vi.mock("../../lib/iterm2Config", () => ({
@@ -400,16 +405,33 @@ describe("WallpaperTool", () => {
     );
   });
 
-  it("shows source error when search fails", async () => {
-    vi.mocked(searchWallpapers).mockRejectedValue(new Error("timeout"));
+  it("shows a network error with proxy guidance when search fails to connect", async () => {
+    vi.mocked(searchWallpapers).mockRejectedValue(
+      new Error("wallhaven request failed: error sending request"),
+    );
     await flush();
     const buttons = Array.from(container.querySelectorAll("button"));
     const searchBtn = buttons.find((b) => b.textContent === "搜索")!;
     await act(async () => {
       searchBtn.click();
     });
-    expect(container.textContent).toContain("搜索失败");
-    expect(container.textContent).toContain("timeout");
+    expect(container.textContent).toContain("连接失败");
+    expect(container.textContent).toContain("检查网络或代理设置");
+    expect(container.textContent).toContain("error sending request");
+  });
+
+  it("shows a generic error without proxy guidance for HTTP failures", async () => {
+    vi.mocked(searchWallpapers).mockRejectedValue(
+      new Error("wallhaven request failed with HTTP 429"),
+    );
+    await flush();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const searchBtn = buttons.find((b) => b.textContent === "搜索")!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    expect(container.textContent).toContain("请求过于频繁");
+    expect(container.textContent).not.toContain("检查网络或代理设置");
   });
 
   it("shows empty-result message when nothing found", async () => {
@@ -420,7 +442,10 @@ describe("WallpaperTool", () => {
     await act(async () => {
       searchBtn.click();
     });
-    expect(container.textContent).toContain("没有找到满足条件的壁纸");
+    expect(toast.info).toHaveBeenCalledWith(
+      "没有找到匹配的壁纸，试试更换关键词或图源",
+    );
+    expect(container.textContent).not.toContain("没有找到匹配的壁纸");
   });
 
   it("loads more results appending page 2 items", async () => {
@@ -518,7 +543,10 @@ describe("WallpaperTool", () => {
       expect.objectContaining({ id: "wallhaven-abc" }),
     );
     expect(applyWallpaper).toHaveBeenCalledWith("/wall/abc.jpg", "cmux", "");
-    expect(container.textContent).toContain("已下载并应用到 cmux");
+    expect(toast.success).toHaveBeenCalledWith(
+      "已下载并应用到 cmux：/wall/abc.jpg。配置已重新加载，cmux 已生效",
+    );
+    expect(container.textContent).not.toContain("已下载并应用到 cmux");
   });
 
   /** 单次应用目标下拉 */
@@ -718,7 +746,9 @@ describe("WallpaperTool", () => {
       "iterm2",
       "work.json",
     );
-    expect(container.textContent).toContain("已下载并应用到 iTerm2");
+    expect(toast.success).toHaveBeenCalledWith(
+      "已下载并应用到 iTerm2：/wall/it.jpg。iTerm2 已重新加载配置",
+    );
   });
 
   it("prompts to pick an iterm2 profile when none is configured", async () => {
@@ -748,7 +778,9 @@ describe("WallpaperTool", () => {
     });
     expect(downloadWallpaper).not.toHaveBeenCalled();
     expect(applyWallpaper).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("未选择 iTerm2 目标 Profile");
+    expect(toast.error).toHaveBeenCalledWith(
+      "未选择 iTerm2 目标 Profile，请在上方设置中选择后再应用",
+    );
     expect(container.textContent).toContain("统一设置");
     expect(container.textContent).toContain("请选择 Profile");
   });
@@ -779,8 +811,8 @@ describe("WallpaperTool", () => {
     await act(async () => {
       applyBtn.click();
     });
-    expect(container.textContent).toContain("应用失败");
-    expect(container.textContent).toContain("reload boom");
+    expect(toast.error).toHaveBeenCalledWith("应用失败：Error: reload boom");
+    expect(toast.error).not.toHaveBeenCalledWith(expect.stringContaining("disk full"));
   });
 
   it("shows failure message when apply errors", async () => {
@@ -808,8 +840,7 @@ describe("WallpaperTool", () => {
     await act(async () => {
       applyBtn.click();
     });
-    expect(container.textContent).toContain("应用失败");
-    expect(container.textContent).toContain("disk full");
+    expect(toast.error).toHaveBeenCalledWith("应用失败：Error: disk full");
   });
 
   it("saves global settings via settings panel", async () => {
@@ -834,7 +865,8 @@ describe("WallpaperTool", () => {
         downloadDir: "",
       }),
     );
-    expect(container.textContent).toContain("设置已保存");
+    expect(toast.success).toHaveBeenCalledWith("设置已保存");
+    expect(container.textContent).not.toContain("设置已保存");
   });
 
   it("settings panel renders apply target and iterm2 profile selects with loaded profiles", async () => {
@@ -959,7 +991,8 @@ describe("WallpaperTool", () => {
           wallhaven: expect.objectContaining({ apiKey: "wh-secret" }),
         }),
       );
-      expect(container.textContent).toContain("参数已自动保存");
+      expect(toast.success).toHaveBeenCalledWith("参数已自动保存");
+      expect(container.textContent).not.toContain("参数已自动保存");
     } finally {
       vi.useRealTimers();
     }
@@ -1300,7 +1333,8 @@ describe("WallpaperTool", () => {
         wallhaven: expect.objectContaining({ seed: "mockedseed1234" }),
       }),
     );
-    expect(container.textContent).toContain("seed 已刷新并保存");
+    expect(toast.success).toHaveBeenCalledWith("seed 已刷新并保存");
+    expect(container.textContent).not.toContain("seed 已刷新并保存");
   });
 
   describe("Lightbox 预览", () => {
@@ -1603,8 +1637,10 @@ describe("WallpaperTool", () => {
         "cmux",
         "",
       );
-      expect(dialog.textContent).toContain("已下载并应用到 cmux");
-      expect(dialog.textContent).toContain("已生效");
+      expect(toast.success).toHaveBeenCalledWith(
+        "已下载并应用到 cmux：/wall/preview.jpg。已生效",
+      );
+      expect(dialog.textContent).not.toContain("已下载并应用到 cmux");
       expect(container.querySelector('[role="dialog"]')).not.toBeNull();
 
       vi.mocked(downloadWallpaper).mockRejectedValue(new Error("disk full"));
@@ -1612,8 +1648,8 @@ describe("WallpaperTool", () => {
         dialogTextButton(dialog, "下载并应用").click();
       });
       await flush();
-      expect(dialog.textContent).toContain("应用失败");
-      expect(dialog.textContent).toContain("disk full");
+      expect(toast.error).toHaveBeenCalledWith("应用失败：Error: disk full");
+      expect(dialog.textContent).not.toContain("应用失败");
     });
 
     it("关闭后重新打开时预览状态复位", async () => {

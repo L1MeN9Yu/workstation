@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useUpdateStore } from "../store/update";
 import { getGlobalProxy, saveGlobalProxy } from "../lib/proxy";
 import { confirmDialog } from "../lib/confirm";
+import { toast } from "../lib/toast";
+import Button from "../components/Button";
 import {
   ACCENT_COLORS,
   isHexColor,
@@ -178,8 +180,6 @@ function ThemeSection() {
 function ProxySection() {
   const [proxy, setProxy] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,13 +194,11 @@ function ProxySection() {
   async function handleSave() {
     if (proxy === null) return;
     setSaving(true);
-    setMessage(null);
-    setError(null);
     try {
       await saveGlobalProxy(proxy);
-      setMessage("代理配置已保存");
+      toast.success("代理配置已保存");
     } catch (e) {
-      setError(String(e));
+      toast.error(String(e));
     } finally {
       setSaving(false);
     }
@@ -218,31 +216,15 @@ function ProxySection() {
           value={proxy ?? ""}
           onChange={(e) => {
             setProxy(e.target.value);
-            setMessage(null);
-            setError(null);
           }}
           placeholder="http://127.0.0.1:7890"
           className="mt-1 w-full rounded-md border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-sm dark:border-gray-700 dark:bg-gray-900"
         />
       </label>
-      {message && (
-        <div className="mt-2 text-sm text-green-600 dark:text-green-400">
-          {message}
-        </div>
-      )}
-      {error && (
-        <div className="mt-2 text-sm text-red-500 dark:text-red-400">
-          {error}
-        </div>
-      )}
       <div className="mt-3">
-        <button
-          onClick={handleSave}
-          disabled={saving || proxy === null}
-          className="rounded-md bg-gray-200 px-4 py-1.5 text-sm text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
-        >
+        <Button variant="secondary" onClick={handleSave} disabled={saving || proxy === null}>
           {saving ? "保存中..." : "保存"}
-        </button>
+        </Button>
       </div>
     </section>
   );
@@ -262,6 +244,12 @@ function UpdateSection() {
   } = useUpdateStore();
 
   const busy = status === "checking" || status === "downloading";
+
+  useEffect(() => {
+    if (status === "error") {
+      toast.error(errorMessage ?? "检查更新失败");
+    }
+  }, [status, errorMessage]);
 
   async function handleCheck() {
     await check();
@@ -335,30 +323,23 @@ function UpdateSection() {
       )}
 
       <div className="flex items-center gap-2">
-        <button
+        <Button
+          variant="secondary"
           onClick={handleCheck}
           disabled={busy}
-          className="rounded-md bg-gray-200 px-4 py-1.5 text-sm text-gray-700 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200"
+          className="px-3 py-1"
         >
           {status === "checking" ? "检查中..." : "检查更新"}
-        </button>
+        </Button>
         {status === "available" && (
-          <button
-            onClick={handleDownload}
-            disabled={busy}
-            className="rounded-md bg-accent-600 px-4 py-1.5 text-sm text-white disabled:opacity-50"
-          >
+          <Button variant="primary" onClick={handleDownload} disabled={busy} className="px-3 py-1">
             下载并安装
-          </button>
+          </Button>
         )}
         {status === "error" && (
-          <button
-            onClick={handleDownload}
-            disabled={busy}
-            className="rounded-md bg-accent-600 px-4 py-1.5 text-sm text-white disabled:opacity-50"
-          >
+          <Button variant="primary" onClick={handleDownload} disabled={busy} className="px-3 py-1">
             重试下载
-          </button>
+          </Button>
         )}
       </div>
     </section>

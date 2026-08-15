@@ -6,6 +6,8 @@ import {
 } from "../lib/cmuxConfig";
 import CmuxConfigForm from "../components/CmuxConfigForm";
 import GhostyConfigForm from "../components/GhostyConfigForm";
+import Alert from "../components/Alert";
+import EmptyState from "../components/EmptyState";
 
 type Tab = "cmux" | "ghosty";
 
@@ -58,11 +60,7 @@ export default function CmuxConfig() {
         ))}
       </div>
 
-      {error && (
-        <div className="mb-4 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
-          读取失败：{error}
-        </div>
-      )}
+      {error && <Alert variant="error">读取失败：{error}</Alert>}
 
       {active ? (
         <div className="rounded-lg border border-gray-200 dark:border-gray-700">
@@ -78,9 +76,7 @@ export default function CmuxConfig() {
           </div>
         </div>
       ) : (
-        <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-gray-300 text-gray-400 dark:border-gray-600">
-          加载中...
-        </div>
+        <EmptyState>加载中...</EmptyState>
       )}
     </div>
   );
