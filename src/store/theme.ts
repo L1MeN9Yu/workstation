@@ -1,6 +1,16 @@
 import { create } from "zustand";
 
-export type Theme = "light" | "dark";
+export type Theme = "light" | "dark" | "system";
+
+export function resolveTheme(
+  theme: Theme,
+  prefersDark: boolean,
+): "light" | "dark" {
+  if (theme === "system") {
+    return prefersDark ? "dark" : "light";
+  }
+  return theme;
+}
 
 export const ACCENT_COLORS = [
   "blue",
@@ -31,7 +41,35 @@ export interface ThemeSettings {
 
 const isTauri = typeof window !== "undefined" && !!window.__TAURI_INTERNALS__;
 
+export function getSystemPrefersDark(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+  );
+}
+
+export function subscribeSystemTheme(listener: (prefersDark: boolean) => void): () => void {
+  if (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function"
+  ) {
+    return () => {};
+  }
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  const handler = (event: MediaQueryListEvent) => {
+    listener(event.matches);
+  };
+  if (typeof mq.addEventListener === "function") {
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }
+  mq.addListener(handler);
+  return () => mq.removeListener(handler);
+}
+
 interface ThemeState extends ThemeSettings {
+  resolvedTheme: "light" | "dark";
   _userTouched: boolean;
   toggle: () => void;
   setTheme: (t: Theme) => void;
@@ -50,9 +88,9 @@ export function isAccentColor(value: unknown): value is AccentColor {
 }
 
 export function applyTheme(theme: Theme, accent: AccentColor = "blue") {
-  document.documentElement.classList.toggle("dark", theme === "dark");
-  document.documentElement.dataset.theme = theme;
-  applyAccent(accent);
+  const resolved = resolveTheme(theme, getSystemPrefersDark());
+  applyResolvedTheme(resolved, accent);
+  return resolved;
 }
 
 function applyAccent(accent: AccentColor) {
@@ -91,7 +129,7 @@ export function persistTheme(settings: ThemeSettings) {
 }
 
 export function parseThemeSettings(value: unknown): ThemeSettings | null {
-  if (value === "light" || value === "dark") {
+  if (value === "light" || value === "dark" || value === "system") {
     return { theme: value, accent: "blue" };
   }
   if (typeof value === "string") {
@@ -106,37 +144,63 @@ export function parseThemeSettings(value: unknown): ThemeSettings | null {
   }
   const obj = value as Record<string, unknown>;
   const theme: Theme | null =
-    obj.theme === "light" || obj.theme === "dark" ? obj.theme : null;
+    obj.theme === "light" || obj.theme === "dark" || obj.theme === "system"
+      ? obj.theme
+      : null;
   const accent: AccentColor | null = isAccentColor(obj.accent)
     ? obj.accent
     : null;
-  return { theme: theme ?? "light", accent: accent ?? "blue" };
+  return { theme: theme ?? "system", accent: accent ?? "blue" };
+}
+
+let unsubscribeSystemTheme: (() => void) | null = null;
+
+function registerSystemThemeListener() {
+  unsubscribeSystemTheme?.();
+  unsubscribeSystemTheme = subscribeSystemTheme((prefersDark) => {
+    const { theme, accent } = useTheme.getState();
+    if (theme === "system") {
+      const resolved = resolveTheme(theme, prefersDark);
+      applyResolvedTheme(resolved, accent);
+      useTheme.setState({ resolvedTheme: resolved });
+    }
+  });
+}
+
+function applyResolvedTheme(resolved: "light" | "dark", accent: AccentColor) {
+  document.documentElement.classList.toggle("dark", resolved === "dark");
+  document.documentElement.dataset.theme = resolved;
+  applyAccent(accent);
 }
 
 export const useTheme = create<ThemeState>((set, get) => ({
-  theme: "light",
+  theme: "system",
+  resolvedTheme: "light",
   accent: "blue",
   _userTouched: false,
   toggle: () => {
-    const next: Theme = get().theme === "light" ? "dark" : "light";
+    const next: Theme = get().resolvedTheme === "light" ? "dark" : "light";
     const settings: ThemeSettings = { theme: next, accent: get().accent };
     persistTheme(settings);
-    set({ theme: next, _userTouched: true });
-    applyTheme(next, get().accent);
+    const nextResolved = applyTheme(next, get().accent);
+    set({ theme: next, resolvedTheme: nextResolved, _userTouched: true });
   },
   setTheme: (theme) => {
-    set({ theme });
-    applyTheme(theme, get().accent);
+    const settings: ThemeSettings = { theme, accent: get().accent };
+    persistTheme(settings);
+    const resolved = applyTheme(theme, get().accent);
+    set({ theme, resolvedTheme: resolved, _userTouched: true });
   },
   setAccent: (accent) => {
     const settings: ThemeSettings = { theme: get().theme, accent };
     persistTheme(settings);
-    set({ accent });
-    applyTheme(get().theme, accent);
+    const resolved = applyTheme(get().theme, accent);
+    set({ accent, resolvedTheme: resolved });
   },
 }));
 
 export async function initTheme(): Promise<void> {
+  registerSystemThemeListener();
   if (useTheme.getState()._userTouched) {
     return;
   }
@@ -155,10 +219,10 @@ export async function initTheme(): Promise<void> {
       saved = parseThemeSettings(raw);
     }
   }
-  const theme: Theme = saved?.theme ?? "light";
+  const theme: Theme = saved?.theme ?? "system";
   const accent: AccentColor = saved?.accent ?? "blue";
-  useTheme.setState({ theme, accent });
-  applyTheme(theme, accent);
+  const resolved = applyTheme(theme, accent);
+  useTheme.setState({ theme, accent, resolvedTheme: resolved });
 }
 
 export function useInitTheme() {
