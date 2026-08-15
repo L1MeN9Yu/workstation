@@ -101,12 +101,19 @@ export function WallpaperLibrary({
   const [busy, setBusy] = useState(false);
   const [applyingPath, setApplyingPath] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewReqRef = useRef(0);
   const loadReqRef = useRef(0);
+
+  /** 当前预览的壁纸路径：按索引从列表推导，索引越界（列表刷新）时自动回到关闭态 */
+  const previewPath =
+    previewIndex === null ? null : (items[previewIndex]?.absolutePath ?? null);
+  /** 是否可切换上一张/下一张（首末张边界） */
+  const canPrev = previewIndex !== null && previewIndex > 0;
+  const canNext = previewIndex !== null && previewIndex < items.length - 1;
 
   const load = useCallback(async (): Promise<void> => {
     const reqId = loadReqRef.current + 1;
@@ -210,43 +217,63 @@ export function WallpaperLibrary({
     }
   }
 
-  async function openPreview(path: string): Promise<void> {
-    const reqId = previewReqRef.current + 1;
-    previewReqRef.current = reqId;
-    setPreviewPath(path);
-    setPreviewUrl(null);
-    setPreviewError(null);
-    setPreviewLoading(true);
-    try {
-      const url = await readLocalWallpaperFile(path);
-      if (previewReqRef.current !== reqId) return;
-      setPreviewUrl(url);
-    } catch (e) {
-      if (previewReqRef.current !== reqId) return;
-      setPreviewError(String(e));
-    } finally {
-      if (previewReqRef.current === reqId) {
-        setPreviewLoading(false);
+  const openPreview = useCallback(
+    async (index: number): Promise<void> => {
+      const path = items[index].absolutePath;
+      const reqId = previewReqRef.current + 1;
+      previewReqRef.current = reqId;
+      setPreviewIndex(index);
+      setPreviewUrl(null);
+      setPreviewError(null);
+      setPreviewLoading(true);
+      try {
+        const url = await readLocalWallpaperFile(path);
+        if (previewReqRef.current !== reqId) return;
+        setPreviewUrl(url);
+      } catch (e) {
+        if (previewReqRef.current !== reqId) return;
+        setPreviewError(String(e));
+      } finally {
+        if (previewReqRef.current === reqId) {
+          setPreviewLoading(false);
+        }
       }
-    }
-  }
+    },
+    [items],
+  );
 
-  function closePreview(): void {
+  const goPrev = useCallback((): void => {
+    if (previewIndex === null || previewIndex <= 0) return;
+    void openPreview(previewIndex - 1);
+  }, [previewIndex, openPreview]);
+
+  const goNext = useCallback((): void => {
+    if (previewIndex === null || previewIndex >= items.length - 1) return;
+    void openPreview(previewIndex + 1);
+  }, [previewIndex, items.length, openPreview]);
+
+  const closePreview = useCallback((): void => {
     previewReqRef.current += 1;
-    setPreviewPath(null);
+    setPreviewIndex(null);
     setPreviewUrl(null);
     setPreviewError(null);
     setPreviewLoading(false);
-  }
+  }, []);
 
   useEffect(() => {
-    if (!previewPath) return;
+    if (previewIndex === null) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closePreview();
+      if (e.key === "Escape") {
+        closePreview();
+      } else if (e.key === "ArrowLeft") {
+        goPrev();
+      } else if (e.key === "ArrowRight") {
+        goNext();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [previewPath]);
+  }, [previewIndex, items.length, closePreview, goPrev, goNext]);
 
   const selectedPaths = [...selected];
   const allSelected =
@@ -319,14 +346,14 @@ export function WallpaperLibrary({
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-          {items.map((item) => (
+          {items.map((item, index) => (
             <div
               key={item.absolutePath}
               className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <button
                 type="button"
-                onClick={() => void openPreview(item.absolutePath)}
+                onClick={() => void openPreview(index)}
                 className="block w-full cursor-pointer"
                 title="点击预览大图"
               >
@@ -390,6 +417,9 @@ export function WallpaperLibrary({
             <span className="max-w-48 truncate text-xs text-gray-300">
               {previewPath.split("/").pop()}
             </span>
+            <span className="text-xs text-gray-400" aria-label="预览位置">
+              {previewIndex !== null ? `${previewIndex + 1} / ${items.length}` : ""}
+            </span>
             <button
               onClick={closePreview}
               aria-label="关闭预览"
@@ -423,6 +453,30 @@ export function WallpaperLibrary({
               />
             )}
           </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              goPrev();
+            }}
+            disabled={!canPrev}
+            aria-label="上一张"
+            className="absolute left-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-gray-900/70 px-3 py-2 text-2xl text-white shadow-lg hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              goNext();
+            }}
+            disabled={!canNext}
+            aria-label="下一张"
+            className="absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-gray-900/70 px-3 py-2 text-2xl text-white shadow-lg hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            ›
+          </button>
         </div>
       )}
     </div>

@@ -294,7 +294,8 @@ export default function WallpaperTool() {
   const [view, setView] = useState<"search" | "library">("search");
 
   // ---- Lightbox 预览状态 ----
-  const [previewItem, setPreviewItem] = useState<WallpaperItem | null>(null);
+  /** 当前预览的壁纸在搜索列表 `items` 中的索引；null 表示未打开 */
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -314,9 +315,16 @@ export default function WallpaperTool() {
   /** 拖拽结束后抑制紧随其后的 click，避免拖拽释放时误关预览 */
   const justDraggedRef = useRef(false);
 
+  /** 当前预览的壁纸：按索引从搜索结果列表推导，索引越界（列表刷新）时自动回到关闭态 */
+  const previewItem =
+    previewIndex === null ? null : (items[previewIndex] ?? null);
+  /** 是否可切换上一张/下一张（首末张边界） */
+  const canPrev = previewIndex !== null && previewIndex > 0;
+  const canNext = previewIndex !== null && previewIndex < items.length - 1;
+
   const closePreview = useCallback(() => {
     previewReqRef.current += 1;
-    setPreviewItem(null);
+    setPreviewIndex(null);
     setDataUrl(null);
     setPreviewError(null);
     setPreviewLoading(false);
@@ -325,32 +333,46 @@ export default function WallpaperTool() {
     setDragging(false);
   }, []);
 
-  async function openPreview(item: WallpaperItem): Promise<void> {
-    const reqId = previewReqRef.current + 1;
-    previewReqRef.current = reqId;
-    setPreviewItem(item);
-    setDataUrl(null);
-    setPreviewError(null);
-    setPreviewLoading(true);
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-    try {
-      const url = await previewWallpaper(item);
-      if (previewReqRef.current !== reqId) return;
-      setDataUrl(url);
-    } catch (e) {
-      if (previewReqRef.current !== reqId) return;
-      setPreviewError(String(e));
-    } finally {
-      if (previewReqRef.current === reqId) {
-        setPreviewLoading(false);
+  const openPreview = useCallback(
+    async (index: number): Promise<void> => {
+      const item = items[index];
+      const reqId = previewReqRef.current + 1;
+      previewReqRef.current = reqId;
+      setPreviewIndex(index);
+      setDataUrl(null);
+      setPreviewError(null);
+      setPreviewLoading(true);
+      setScale(1);
+      setOffset({ x: 0, y: 0 });
+      try {
+        const url = await previewWallpaper(item);
+        if (previewReqRef.current !== reqId) return;
+        setDataUrl(url);
+      } catch (e) {
+        if (previewReqRef.current !== reqId) return;
+        setPreviewError(String(e));
+      } finally {
+        if (previewReqRef.current === reqId) {
+          setPreviewLoading(false);
+        }
       }
-    }
-  }
+    },
+    [items],
+  );
+
+  const goPrev = useCallback((): void => {
+    if (previewIndex === null || previewIndex <= 0) return;
+    void openPreview(previewIndex - 1);
+  }, [previewIndex, openPreview]);
+
+  const goNext = useCallback((): void => {
+    if (previewIndex === null || previewIndex >= items.length - 1) return;
+    void openPreview(previewIndex + 1);
+  }, [previewIndex, items.length, openPreview]);
 
   function handleRetryPreview(): void {
-    if (previewItem) {
-      void openPreview(previewItem);
+    if (previewIndex !== null) {
+      void openPreview(previewIndex);
     }
   }
 
@@ -449,17 +471,23 @@ export default function WallpaperTool() {
     closePreview();
   }
 
-  // Esc 关闭预览
+  // Esc 关闭预览、方向键切换上一张/下一张
   useEffect(() => {
     if (!previewItem) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closePreview();
+      if (e.key === "Escape") {
+        closePreview();
+      } else if (e.key === "ArrowLeft") {
+        goPrev();
+      } else if (e.key === "ArrowRight") {
+        goNext();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [previewItem, closePreview]);
+  }, [previewItem, previewIndex, items.length, closePreview, goPrev, goNext]);
 
   // 滚轮缩放（以光标为锚点），挂原生非被动监听以便 preventDefault
   useEffect(() => {
@@ -1048,10 +1076,10 @@ export default function WallpaperTool() {
 
       {items.length > 0 && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-          {items.map((item) => (
+          {items.map((item, index) => (
             <div
               key={item.id}
-              onClick={() => void openPreview(item)}
+              onClick={() => void openPreview(index)}
               className="cursor-pointer overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <ProxiedThumb
@@ -1148,6 +1176,9 @@ export default function WallpaperTool() {
             <span className="px-1 text-xs text-gray-300">
               {Math.round(scale * 100)}%
             </span>
+            <span className="px-1 text-xs text-gray-400" aria-label="预览位置">
+              {previewIndex !== null ? `${previewIndex + 1} / ${items.length}` : ""}
+            </span>
             <button
               onClick={closePreview}
               aria-label="关闭预览"
@@ -1197,6 +1228,34 @@ export default function WallpaperTool() {
             )}
           </div>
 
+          {/* 左右切换按钮 */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              goPrev();
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            disabled={!canPrev}
+            aria-label="上一张"
+            className="absolute left-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-gray-900/70 px-3 py-2 text-2xl text-white shadow-lg hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              goNext();
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            disabled={!canNext}
+            aria-label="下一张"
+            className="absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-full bg-gray-900/70 px-3 py-2 text-2xl text-white shadow-lg hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            ›
+          </button>
+
           {/* 底部信息栏：分辨率 / 图源 / 下载应用 */}
           <div
             className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-md bg-gray-900/80 px-3 py-2 text-sm text-white shadow-lg"
@@ -1209,7 +1268,7 @@ export default function WallpaperTool() {
             <span className="text-gray-300">
               {getSourceMeta(previewItem.source)?.label ?? previewItem.source}
             </span>
-            <WallpaperTargetSelect value={applyTarget} onChange={setApplyTarget} />
+            <WallpaperTargetSelect value={applyTarget} onChange={setApplyTarget} dark />
             <button
               onClick={() => void handleApply(previewItem)}
               disabled={applyingId === previewItem.id}

@@ -406,4 +406,102 @@ describe("WallpaperLibrary", () => {
     });
     expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
+
+  it("preview shows position and disables prev button on first item", async () => {
+    vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A, ITEM_B]);
+    vi.mocked(readLocalWallpaperFile).mockResolvedValue("data:image/png;base64,big");
+    root = setup(container);
+    await flush();
+    const thumb = container.querySelector("button[title='点击预览大图']") as HTMLButtonElement;
+    act(() => {
+      thumb.click();
+    });
+    await flush();
+    const dialog = container.querySelector('[role="dialog"]')!;
+    expect(dialog.querySelector('[aria-label="预览位置"]')?.textContent).toBe("1 / 2");
+    const prev = dialog.querySelector('button[aria-label="上一张"]') as HTMLButtonElement;
+    const next = dialog.querySelector('button[aria-label="下一张"]') as HTMLButtonElement;
+    expect(prev.disabled).toBe(true);
+    expect(next.disabled).toBe(false);
+  });
+
+  it("preview switches to next wallpaper via button and updates name and position", async () => {
+    vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A, ITEM_B]);
+    vi.mocked(readLocalWallpaperFile)
+      .mockResolvedValueOnce("data:image/png;base64,first")
+      .mockResolvedValueOnce("data:image/png;base64,second");
+    root = setup(container);
+    await flush();
+    const thumb = container.querySelector("button[title='点击预览大图']") as HTMLButtonElement;
+    act(() => {
+      thumb.click();
+    });
+    await flush();
+    const dialog = container.querySelector('[role="dialog"]')!;
+    const next = dialog.querySelector('button[aria-label="下一张"]') as HTMLButtonElement;
+    act(() => {
+      next.click();
+    });
+    await flush();
+    expect(readLocalWallpaperFile).toHaveBeenLastCalledWith("/w/b.jpg");
+    expect(dialog.querySelector('[aria-label="预览位置"]')?.textContent).toBe("2 / 2");
+    expect(dialog.textContent).toContain("b.jpg");
+    const img = dialog.querySelector("img") as HTMLImageElement;
+    expect(img.src).toBe("data:image/png;base64,second");
+    const next2 = dialog.querySelector('button[aria-label="下一张"]') as HTMLButtonElement;
+    expect(next2.disabled).toBe(true);
+    const prev = dialog.querySelector('button[aria-label="上一张"]') as HTMLButtonElement;
+    expect(prev.disabled).toBe(false);
+  });
+
+  it("preview switches via arrow keys and stays within bounds", async () => {
+    vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A, ITEM_B]);
+    vi.mocked(readLocalWallpaperFile).mockResolvedValue("data:image/png;base64,big");
+    root = setup(container);
+    await flush();
+    const thumb = container.querySelector("button[title='点击预览大图']") as HTMLButtonElement;
+    act(() => {
+      thumb.click();
+    });
+    await flush();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    });
+    await flush();
+    const dialog = container.querySelector('[role="dialog"]')!;
+    expect(dialog.querySelector('[aria-label="预览位置"]')?.textContent).toBe("2 / 2");
+    expect(dialog.textContent).toContain("b.jpg");
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    });
+    await flush();
+    expect(dialog.querySelector('[aria-label="预览位置"]')?.textContent).toBe("2 / 2");
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft" }));
+    });
+    await flush();
+    expect(dialog.querySelector('[aria-label="预览位置"]')?.textContent).toBe("1 / 2");
+  });
+
+  it("preview switch failure shows error for current image", async () => {
+    vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A, ITEM_B]);
+    vi.mocked(readLocalWallpaperFile)
+      .mockResolvedValueOnce("data:image/png;base64,first")
+      .mockRejectedValueOnce(new Error("corrupt file"));
+    root = setup(container);
+    await flush();
+    const thumb = container.querySelector("button[title='点击预览大图']") as HTMLButtonElement;
+    act(() => {
+      thumb.click();
+    });
+    await flush();
+    const dialog = container.querySelector('[role="dialog"]')!;
+    const next = dialog.querySelector('button[aria-label="下一张"]') as HTMLButtonElement;
+    act(() => {
+      next.click();
+    });
+    await flush();
+    expect(dialog.textContent).toContain("预览加载失败：Error: corrupt file");
+    expect(dialog.querySelector('[aria-label="预览位置"]')?.textContent).toBe("2 / 2");
+  });
 });
