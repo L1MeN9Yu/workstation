@@ -91,6 +91,16 @@ const PREVIEW_ITEM: WallpaperItem = {
   height: 1080,
 };
 
+const PREVIEW_ITEM_2: WallpaperItem = {
+  id: "wallhaven-second",
+  source: "wallhaven",
+  thumb_url: "https://thumb.example/b.jpg",
+  thumb_hash: "bbbbbbbbbbbbbbbb",
+  full_url: "https://full.example/b.jpg",
+  width: 2560,
+  height: 1440,
+};
+
 describe("WallpaperTool", () => {
   let container: HTMLElement;
   let root: Root;
@@ -1330,6 +1340,34 @@ describe("WallpaperTool", () => {
       ) as HTMLButtonElement;
     }
 
+    /** 搜索多张结果并点击第 index 张卡片打开预览 */
+    async function openLightboxAt(
+      results: WallpaperItem[],
+      index: number,
+    ): Promise<HTMLElement> {
+      vi.mocked(searchWallpapers).mockResolvedValue(results);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        const cards = container.querySelectorAll(
+          ".overflow-hidden.rounded-lg",
+        );
+        (cards[index] as HTMLElement).click();
+      });
+      await flush();
+      return container.querySelector('[role="dialog"]') as HTMLElement;
+    }
+
+    /** 对话框内的位置指示文本（如 1 / 2） */
+    function positionText(dialog: HTMLElement): string {
+      return dialog.querySelector('[aria-label="预览位置"]')!.textContent ?? "";
+    }
+
     it("点击缩略图卡片打开预览，加载完成后展示 data URL 图片与元信息", async () => {
       let resolvePreview!: (url: string) => void;
       vi.mocked(previewWallpaper).mockImplementation(
@@ -1587,6 +1625,113 @@ describe("WallpaperTool", () => {
       expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
         "data:image/jpeg;base64,NEW",
       );
+    });
+
+    it("打开预览展示位置指示，首张时上一张禁用、下一张可用", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightboxAt([PREVIEW_ITEM, PREVIEW_ITEM_2], 0);
+      expect(positionText(dialog)).toBe("1 / 2");
+      expect(dialogButton(dialog, "上一张").disabled).toBe(true);
+      expect(dialogButton(dialog, "下一张").disabled).toBe(false);
+      expect(previewWallpaper).toHaveBeenCalledTimes(1);
+    });
+
+    it("点击下一张切换图片并更新位置，末张时下一张禁用", async () => {
+      vi.mocked(previewWallpaper)
+        .mockResolvedValueOnce("data:image/jpeg;base64,FIRST")
+        .mockResolvedValueOnce("data:image/jpeg;base64,SECOND");
+      const dialog = await openLightboxAt([PREVIEW_ITEM, PREVIEW_ITEM_2], 0);
+      await act(async () => {
+        dialogButton(dialog, "下一张").click();
+      });
+      await flush();
+      expect(positionText(dialog)).toBe("2 / 2");
+      expect(dialogButton(dialog, "下一张").disabled).toBe(true);
+      expect(dialogButton(dialog, "上一张").disabled).toBe(false);
+      expect(previewWallpaper).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: "wallhaven-second" }),
+      );
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,SECOND",
+      );
+    });
+
+    it("方向键切换上一张/下一张", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightboxAt([PREVIEW_ITEM, PREVIEW_ITEM_2], 0);
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowRight" }),
+        );
+      });
+      await flush();
+      expect(positionText(dialog)).toBe("2 / 2");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft" }));
+      });
+      await flush();
+      expect(positionText(dialog)).toBe("1 / 2");
+      // 首张按 ← 不越界
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft" }));
+      });
+      await flush();
+      expect(positionText(dialog)).toBe("1 / 2");
+    });
+
+    it("切换图片后缩放与偏移复位", async () => {
+      vi.mocked(previewWallpaper)
+        .mockResolvedValueOnce("data:image/jpeg;base64,FIRST")
+        .mockResolvedValueOnce("data:image/jpeg;base64,SECOND");
+      const dialog = await openLightboxAt([PREVIEW_ITEM, PREVIEW_ITEM_2], 0);
+      const img = dialog.querySelector("img")!;
+      await act(async () => {
+        dialogButton(dialog, "放大").click();
+      });
+      expect(img.style.transform).toContain("scale(1.2)");
+      await act(async () => {
+        dialogButton(dialog, "下一张").click();
+      });
+      await flush();
+      const img2 = dialog.querySelector("img")!;
+      expect(img2.style.transform).toContain("translate3d(0px, 0px, 0) scale(1)");
+      expect(dialog.textContent).toContain("100%");
+    });
+
+    it("切换后加载失败展示错误，可重试当前张", async () => {
+      vi.mocked(previewWallpaper)
+        .mockResolvedValueOnce("data:image/jpeg;base64,FIRST")
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValueOnce("data:image/jpeg;base64,RETRIED");
+      const dialog = await openLightboxAt([PREVIEW_ITEM, PREVIEW_ITEM_2], 0);
+      await act(async () => {
+        dialogButton(dialog, "下一张").click();
+      });
+      await flush();
+      expect(dialog.textContent).toContain("预览加载失败");
+      expect(dialog.textContent).toContain("network down");
+      const retryBtn = Array.from(dialog.querySelectorAll("button")).find(
+        (b) => b.textContent === "重试",
+      )!;
+      await act(async () => {
+        retryBtn.click();
+      });
+      await flush();
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,RETRIED",
+      );
+      expect(positionText(dialog)).toBe("2 / 2");
+    });
+
+    it("预览底部应用目标下拉使用深色高对比度样式", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightboxAt([PREVIEW_ITEM], 0);
+      const select = dialog.querySelector('select[aria-label="应用目标"]')!;
+      expect(select.className).toContain("bg-gray-700/80");
+      expect(select.className).toContain("text-white");
+      const option = dialog.querySelector("option")!;
+      expect(option.className).toContain("bg-gray-900");
+      expect(option.className).toContain("text-white");
     });
   });
 
