@@ -199,7 +199,8 @@ pub async fn search_wallpapers(
     query: SearchQuery,
     settings: Option<WallpaperSettings>,
 ) -> Result<Vec<WallpaperItem>, String> {
-    let settings = settings.unwrap_or_else(wallpaper_settings_from_config);
+    let mut settings = settings.unwrap_or_else(wallpaper_settings_from_config);
+    settings.apply_global_proxy(read_global_proxy());
     let items = wallpaper::search_wallpapers(query, settings.clone()).await?;
     let state = app.state::<ThumbState>();
     state.register(&items);

@@ -89,6 +89,14 @@ impl WallpaperSettings {
     pub fn source(&self, id: &str) -> SourceSettings {
         self.sources.get(id).cloned().unwrap_or_default()
     }
+
+    /// 用全局代理配置覆盖 settings 内嵌 proxy：全局非空时覆盖（含覆盖 None），为空时置 None 直连。
+    pub fn apply_global_proxy(&mut self, global: Option<String>) {
+        self.proxy = match global {
+            Some(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
+            _ => None,
+        };
+    }
 }
 
 fn build_client(proxy: Option<&str>) -> Result<Client, String> {
@@ -942,6 +950,41 @@ mod tests {
         assert!(build_client(Some("http://127.0.0.1:7890")).is_ok());
         assert!(build_client(None).is_ok());
         assert!(build_client(Some("not a valid url")).is_err());
+    }
+
+    #[test]
+    fn apply_global_proxy_overrides_embedded_proxy() {
+        let mut settings = settings_with_sources(Some("http://embedded:8080"), &[]);
+        settings.apply_global_proxy(Some("http://127.0.0.1:7890".to_string()));
+        assert_eq!(settings.proxy.as_deref(), Some("http://127.0.0.1:7890"));
+    }
+
+    #[test]
+    fn apply_global_proxy_fills_missing_proxy() {
+        let mut settings = settings_with_sources(None, &[]);
+        settings.apply_global_proxy(Some("http://127.0.0.1:7890".to_string()));
+        assert_eq!(settings.proxy.as_deref(), Some("http://127.0.0.1:7890"));
+    }
+
+    #[test]
+    fn apply_global_proxy_clears_proxy_on_empty_string() {
+        let mut settings = settings_with_sources(Some("http://embedded:8080"), &[]);
+        settings.apply_global_proxy(Some("   ".to_string()));
+        assert_eq!(settings.proxy, None);
+    }
+
+    #[test]
+    fn apply_global_proxy_clears_proxy_on_none() {
+        let mut settings = settings_with_sources(Some("http://embedded:8080"), &[]);
+        settings.apply_global_proxy(None);
+        assert_eq!(settings.proxy, None);
+    }
+
+    #[test]
+    fn apply_global_proxy_trims_whitespace() {
+        let mut settings = settings_with_sources(None, &[]);
+        settings.apply_global_proxy(Some("  http://127.0.0.1:7890  ".to_string()));
+        assert_eq!(settings.proxy.as_deref(), Some("http://127.0.0.1:7890"));
     }
 
     #[test]
