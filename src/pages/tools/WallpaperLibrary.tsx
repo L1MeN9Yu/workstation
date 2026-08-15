@@ -11,6 +11,7 @@ import {
   type LocalWallpaperInfo,
 } from "../../lib/wallpaper";
 import { WallpaperTargetSelect } from "../../components/WallpaperTargetSelect";
+import { confirmDialog } from "../../lib/confirm";
 
 interface WallpaperLibraryProps {
   applyTarget: ApplyWallpaperTarget;
@@ -165,7 +166,10 @@ export function WallpaperLibrary({
 
   async function handleDelete(paths: string[]): Promise<void> {
     if (paths.length === 0) return;
-    if (!window.confirm(`确认删除 ${paths.length} 张壁纸？此操作不可恢复。`)) {
+    const ok = await confirmDialog(
+      `确认删除 ${paths.length} 张壁纸？此操作不可恢复。`,
+    );
+    if (!ok) {
       return;
     }
     setBusy(true);

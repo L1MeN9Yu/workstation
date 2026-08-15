@@ -19,6 +19,12 @@ vi.mock("../lib/proxy", () => ({
   saveGlobalProxy: vi.fn(async () => undefined),
 }));
 
+vi.mock("../lib/confirm", () => ({
+  confirmDialog: vi.fn(async () => true),
+}));
+
+import { confirmDialog } from "../lib/confirm";
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 async function renderPage(container: HTMLElement): Promise<Root> {
@@ -55,9 +61,9 @@ describe("Settings update section", () => {
 
   beforeEach(() => {
     resetStore();
+    vi.mocked(confirmDialog).mockResolvedValue(true);
     container = document.createElement("div");
     document.body.appendChild(container);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -119,9 +125,13 @@ describe("Settings update section", () => {
         listener(1000, 1000);
       },
     );
+    vi.mocked(confirmDialog).mockResolvedValue(true);
     const root = await renderPage(container);
     await clickButton(container, "检查更新");
     await clickButton(container, "下载并安装");
+    expect(confirmDialog).toHaveBeenCalledWith(
+      "下载并安装更新？安装过程中请保存好当前工作，应用将自动重启。",
+    );
     expect(container.textContent).toContain("更新已下载，应用即将自动重启并安装");
     expect(useUpdateStore.getState().status).toBe("ready");
     expect(useUpdateStore.getState().downloadedBytes).toBe(1000);
@@ -137,7 +147,8 @@ describe("Settings update section", () => {
     });
     const downloadSpy = vi.fn();
     vi.mocked(updater.downloadWithProgress).mockImplementation(downloadSpy);
-    vi.mocked(window.confirm).mockReturnValue(false);    const root = await renderPage(container);
+    vi.mocked(confirmDialog).mockResolvedValue(false);
+    const root = await renderPage(container);
     await clickButton(container, "检查更新");
     await clickButton(container, "下载并安装");
     expect(downloadSpy).not.toHaveBeenCalled();
