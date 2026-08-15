@@ -4,7 +4,6 @@ export const DEFAULT_PROXY = "";
 
 const PROXY_KEY = "proxy";
 const WALLPAPER_KEY = "wallpaper";
-const LEGACY_DEFAULT_PROXY = "http://127.0.0.1:7890";
 
 export function isValidProxyUrl(url: string): boolean {
   if (url.trim() === "") {
@@ -20,7 +19,7 @@ export function isValidProxyUrl(url: string): boolean {
 
 /**
  * 读取全局代理配置（`proxy.json` 的 `proxy` 字段，空串表示未配置）。
- * 首次调用时若全局未配置且旧壁纸配置存在非默认代理，则一次性迁移：
+ * 首次调用时若全局未配置且旧壁纸配置存在非空代理，则一次性迁移：
  * 写入全局配置并清除壁纸配置中的 proxy 字段。
  * 非 Tauri 环境（invoke 失败）返回空串。
  */
@@ -40,7 +39,7 @@ export async function getGlobalProxy(): Promise<string> {
       WALLPAPER_KEY,
     );
     const legacy = wp?.proxy ?? "";
-    if (legacy.trim() !== "" && legacy !== LEGACY_DEFAULT_PROXY) {
+    if (legacy.trim() !== "") {
       await writeConfig(PROXY_KEY, { proxy: legacy });
       const rest = { ...wp };
       delete rest.proxy;

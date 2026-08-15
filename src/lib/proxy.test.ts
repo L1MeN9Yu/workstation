@@ -56,16 +56,25 @@ describe("getGlobalProxy", () => {
     expect(mockedWrite).toHaveBeenCalledWith("wallpaper", { downloadDir: "/tmp" });
   });
 
-  it("does not migrate default wallpaper proxy", async () => {
+  it("migrates legacy default wallpaper proxy and clears wallpaper field", async () => {
     mockedRead
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ proxy: "http://127.0.0.1:7890" });
-    expect(await getGlobalProxy()).toBe("");
-    expect(mockedWrite).not.toHaveBeenCalled();
+      .mockResolvedValueOnce({ proxy: "http://127.0.0.1:7890", downloadDir: "/tmp" });
+    expect(await getGlobalProxy()).toBe("http://127.0.0.1:7890");
+    expect(mockedWrite).toHaveBeenCalledWith("proxy", {
+      proxy: "http://127.0.0.1:7890",
+    });
+    expect(mockedWrite).toHaveBeenCalledWith("wallpaper", { downloadDir: "/tmp" });
   });
 
   it("does not migrate empty wallpaper proxy", async () => {
     mockedRead.mockResolvedValueOnce(null).mockResolvedValueOnce({ proxy: "" });
+    expect(await getGlobalProxy()).toBe("");
+    expect(mockedWrite).not.toHaveBeenCalled();
+  });
+
+  it("does not migrate missing wallpaper proxy", async () => {
+    mockedRead.mockResolvedValueOnce(null).mockResolvedValueOnce({ downloadDir: "/tmp" });
     expect(await getGlobalProxy()).toBe("");
     expect(mockedWrite).not.toHaveBeenCalled();
   });
