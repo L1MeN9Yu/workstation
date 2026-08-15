@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useUpdateStore } from "../store/update";
 import { getGlobalProxy, saveGlobalProxy } from "../lib/proxy";
+import { confirmDialog } from "../lib/confirm";
 import { ToolPage } from "./ToolPage";
 
 function formatBytes(bytes: number | null): string {
@@ -102,7 +103,7 @@ export default function Settings() {
   }
 
   async function handleDownload() {
-    const ok = window.confirm(
+    const ok = await confirmDialog(
       "下载并安装更新？安装过程中请保存好当前工作，应用将自动重启。",
     );
     if (!ok) {

@@ -40,6 +40,12 @@ vi.mock("../../components/WallpaperTargetSelect", () => ({
   ),
 }));
 
+vi.mock("../../lib/confirm", () => ({
+  confirmDialog: vi.fn(),
+}));
+
+import { confirmDialog } from "../../lib/confirm";
+
 const ITEM_A: LocalWallpaperInfo = {
   fileName: "a.png",
   absolutePath: "/w/a.png",
@@ -81,13 +87,12 @@ async function flush(): Promise<void> {
 describe("WallpaperLibrary", () => {
   let container: HTMLElement;
   let root: Root;
-  let confirmSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
     vi.clearAllMocks();
-    confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.mocked(confirmDialog).mockResolvedValue(true);
     vi.mocked(fetchWallpaperThumb).mockResolvedValue("data:image/jpeg;base64,thumb");
   });
 
@@ -95,7 +100,6 @@ describe("WallpaperLibrary", () => {
     act(() => {
       root?.unmount();
     });
-    confirmSpy.mockRestore();
     container.remove();
   });
 
@@ -199,7 +203,9 @@ describe("WallpaperLibrary", () => {
     act(() => {
       del.click();
     });
-    expect(confirmSpy).toHaveBeenCalledWith("确认删除 1 张壁纸？此操作不可恢复。");
+    expect(confirmDialog).toHaveBeenCalledWith(
+      "确认删除 1 张壁纸？此操作不可恢复。",
+    );
     await flush();
     expect(deleteLocalWallpapers).toHaveBeenCalledWith(["/w/a.png"]);
     expect(container.textContent).toContain("已删除 1 张壁纸");
@@ -208,10 +214,10 @@ describe("WallpaperLibrary", () => {
 
   it("cancelling delete keeps files untouched", async () => {
     vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
-    confirmSpy.mockReturnValue(false);
+    vi.mocked(confirmDialog).mockResolvedValue(false);
     root = setup(container);
     await flush();
-    const checkbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    const checkbox = container.querySelector('input[aria-label="选择 a.png"]') as HTMLInputElement;
     act(() => {
       checkbox.click();
     });
