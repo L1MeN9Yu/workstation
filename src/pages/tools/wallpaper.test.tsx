@@ -5,6 +5,7 @@ import WallpaperTool from "./wallpaper";
 import {
   applyWallpaper,
   downloadWallpaper,
+  listLocalWallpapers,
   loadWallpaperSettings,
   previewWallpaper,
   saveWallpaperProxy,
@@ -52,6 +53,12 @@ vi.mock("../../lib/wallpaper", () => ({
   generateSeed: vi.fn(() => "mockedseed1234"),
   applyWallpaper: vi.fn(),
   downloadWallpaper: vi.fn(),
+  listLocalWallpapers: vi.fn(),
+  fetchWallpaperThumb: vi.fn().mockResolvedValue("data:image/jpeg;base64,thumb"),
+  readLocalWallpaperFile: vi.fn(),
+  deleteLocalWallpapers: vi.fn(),
+  formatFileSize: (bytes: number) => `${bytes}B`,
+  formatModifiedTime: (ms: number) => `t${ms}`,
   loadWallpaperSettings: vi.fn(),
   previewWallpaper: vi.fn(),
   saveWallpaperProxy: vi.fn().mockResolvedValue(undefined),
@@ -1580,6 +1587,47 @@ describe("WallpaperTool", () => {
       expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
         "data:image/jpeg;base64,NEW",
       );
+    });
+  });
+
+  describe("本地壁纸库视图", () => {
+    it("点击「本地壁纸库」切换视图并加载列表，再切回搜索视图", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([
+        {
+          fileName: "a.png",
+          absolutePath: "/w/a.png",
+          sizeBytes: 10,
+          modifiedAtMs: 1000,
+          thumbDataUrl: "data:image/jpeg;base64,x",
+        },
+      ]);
+      await flush();
+      const buttons = Array.from(container.querySelectorAll("button"));
+      const libButton = buttons.find((b) => b.textContent === "本地壁纸库")!;
+      await act(async () => {
+        libButton.click();
+      });
+      await flush();
+      expect(container.textContent).toContain("a.png");
+      expect(listLocalWallpapers).toHaveBeenCalled();
+      expect(container.textContent).toContain("删除选中（0）");
+      // 本地壁纸库视图不显示图源 tab，避免 wallhaven 残留选中态
+      const libButtons = Array.from(container.querySelectorAll("button"));
+      expect(
+        libButtons.find((b) => b.textContent === "wallhaven"),
+      ).toBeUndefined();
+
+      const buttons2 = Array.from(container.querySelectorAll("button"));
+      const back = buttons2.find((b) => b.textContent === "在线搜索")!;
+      await act(async () => {
+        back.click();
+      });
+      await flush();
+      expect(container.textContent).toContain("搜索壁纸以预览");
+      const searchButtons = Array.from(container.querySelectorAll("button"));
+      expect(
+        searchButtons.find((b) => b.textContent === "wallhaven"),
+      ).toBeDefined();
     });
   });
 });

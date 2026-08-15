@@ -17,6 +17,70 @@ import {
 /** 壁纸应用目标：cmux（写入 ghosty 配置）或 iTerm2（写入 Dynamic Profile） */
 export type ApplyWallpaperTarget = "cmux" | "iterm2";
 
+/** 本地壁纸库中的一张壁纸文件信息 */
+export interface LocalWallpaperInfo {
+  fileName: string;
+  absolutePath: string;
+  sizeBytes: number;
+  modifiedAtMs: number;
+  thumbDataUrl: string;
+}
+
+/** 批量删除本地壁纸的汇总结果 */
+export interface DeleteWallpapersResult {
+  deleted: string[];
+  errors: string[];
+}
+
+/** 将字节数格式化为人类可读大小（B/KB/MB/GB） */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/** 将 epoch 毫秒格式化为本地时间 `YYYY-MM-DD HH:mm` */
+export function formatModifiedTime(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+}
+
+/** 按修改时间从新到旧排序（防御性：后端已排序） */
+export function sortByModifiedDesc(items: LocalWallpaperInfo[]): LocalWallpaperInfo[] {
+  return [...items].sort((a, b) => b.modifiedAtMs - a.modifiedAtMs);
+}
+
+/** 列出本地壁纸目录中的壁纸文件 */
+export function listLocalWallpapers(settings?: WallpaperSettings): Promise<LocalWallpaperInfo[]> {
+  return invoke<LocalWallpaperInfo[]>("list_local_wallpapers", { settings });
+}
+
+/** 生成单张本地壁纸的缩略图 data URL（列表秒回后逐张并行拉取） */
+export function fetchWallpaperThumb(path: string): Promise<string> {
+  return invoke<string>("wallpaper_thumb", { path });
+}
+
+/** 读取本地壁纸文件并返回 data URL（大图预览用） */
+export function readLocalWallpaperFile(path: string): Promise<string> {
+  return invoke<string>("read_local_wallpaper_file", { path });
+}
+
+/** 批量删除本地壁纸文件 */
+export function deleteLocalWallpapers(paths: string[]): Promise<DeleteWallpapersResult> {
+  return invoke<DeleteWallpapersResult>("delete_local_wallpapers", { paths });
+}
+
+
 /** 将 iTerm2 配置重载状态转为用户可读消息 */
 export function iterm2ReloadStatusMessage(
   result: Awaited<ReturnType<typeof reloadIterm2Config>>,

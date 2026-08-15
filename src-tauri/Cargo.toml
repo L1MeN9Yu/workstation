@@ -33,4 +33,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sha2 = "0.10"
 base64 = "0.22"
 fontdb = "0.24.0"
+image = "0.25"
+
+[dev-dependencies]
+filetime = "0.2.29"
 

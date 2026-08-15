@@ -9,6 +9,8 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { ToolPage } from "../ToolPage";
 import OpenLogDirButton from "../../components/OpenLogDirButton";
+import { WallpaperTargetSelect } from "../../components/WallpaperTargetSelect";
+import { WallpaperLibrary } from "./WallpaperLibrary";
 import {
   BIT_GROUPS,
   RATIO_OPTIONS,
@@ -51,29 +53,6 @@ const DRAG_THRESHOLD_PX = 4;
 /** 将缩放值限制在允许范围内 */
 function clampZoom(scale: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
-}
-
-/** 应用目标选择下拉（单次应用临时切换，不影响持久化默认值） */
-function TargetSelect({
-  value,
-  onChange,
-}: {
-  value: ApplyWallpaperTarget;
-  onChange: (target: ApplyWallpaperTarget) => void;
-}) {
-  return (
-    <select
-      value={value}
-      aria-label="应用目标"
-      onClick={(e) => e.stopPropagation()}
-      onPointerDown={(e) => e.stopPropagation()}
-      onChange={(e) => onChange(e.target.value as ApplyWallpaperTarget)}
-      className="rounded-md border border-gray-300 bg-gray-50 px-1 py-0.5 text-xs dark:border-gray-600 dark:bg-gray-900"
-    >
-      <option value="cmux">cmux</option>
-      <option value="iterm2">iTerm2</option>
-    </select>
-  );
 }
 
 /**
@@ -311,6 +290,8 @@ export default function WallpaperTool() {
   const [hasMore, setHasMore] = useState(false);
   const pageRef = useRef(1);
   const saveTimerRef = useRef<number | null>(null);
+  /** 当前视图：search（搜索）或 library（本地壁纸库） */
+  const [view, setView] = useState<"search" | "library">("search");
 
   // ---- Lightbox 预览状态 ----
   const [previewItem, setPreviewItem] = useState<WallpaperItem | null>(null);
@@ -618,6 +599,12 @@ export default function WallpaperTool() {
     }
   }
 
+  /** 本地库应用 iTerm2 但未配置 Profile 时：打开设置面板并提示 */
+  function handleRequireProfile(): void {
+    setShowSettings(true);
+    setStatus("未选择 iTerm2 目标 Profile，请在上方设置中选择后再应用");
+  }
+
   async function handleRefreshSeed() {
     if (!settings) return;
     const updated = {
@@ -704,6 +691,37 @@ export default function WallpaperTool() {
     >
       <div className="mb-3 flex items-center justify-between">
         <div className="flex gap-2">
+          <button
+            onClick={() => setView("search")}
+            className={`rounded-md px-3 py-1 text-sm ${
+              view === "search"
+                ? "bg-blue-600 text-white"
+                : "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+            }`}
+          >
+            在线搜索
+          </button>
+          <button
+            onClick={() => setView("library")}
+            className={`rounded-md px-3 py-1 text-sm ${
+              view === "library"
+                ? "bg-blue-600 text-white"
+                : "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+            }`}
+          >
+            本地壁纸库
+          </button>
+        </div>
+        <button
+          onClick={() => setShowSettings((v) => !v)}
+          className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white"
+        >
+          设置
+        </button>
+      </div>
+
+      {view === "search" && (
+        <div className="mb-3 flex gap-2">
           {WALLPAPER_SOURCES.map((s) => (
             <button
               key={s.id}
@@ -725,15 +743,9 @@ export default function WallpaperTool() {
             </button>
           ))}
         </div>
-        <button
-          onClick={() => setShowSettings((v) => !v)}
-          className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white"
-        >
-          设置
-        </button>
-      </div>
+      )}
 
-      {meta && (
+      {view === "search" && meta && (
         <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
           <p className="text-xs text-gray-500">{meta.description}</p>
           <a
@@ -978,6 +990,15 @@ export default function WallpaperTool() {
         </div>
       )}
 
+      {view === "library" ? (
+        <WallpaperLibrary
+          applyTarget={applyTarget}
+          onApplyTargetChange={setApplyTarget}
+          iterm2Profile={settings?.iterm2Profile ?? ""}
+          onRequireProfile={handleRequireProfile}
+        />
+      ) : (
+        <>
       <div className="mb-3 flex gap-2">
         <input
           value={keywords}
@@ -1043,7 +1064,7 @@ export default function WallpaperTool() {
                   {item.width}×{item.height}
                 </span>
                 <div className="flex items-center gap-1">
-                  <TargetSelect
+                  <WallpaperTargetSelect
                     value={applyTarget}
                     onChange={setApplyTarget}
                   />
@@ -1188,7 +1209,7 @@ export default function WallpaperTool() {
             <span className="text-gray-300">
               {getSourceMeta(previewItem.source)?.label ?? previewItem.source}
             </span>
-            <TargetSelect value={applyTarget} onChange={setApplyTarget} />
+            <WallpaperTargetSelect value={applyTarget} onChange={setApplyTarget} />
             <button
               onClick={() => void handleApply(previewItem)}
               disabled={applyingId === previewItem.id}
@@ -1203,6 +1224,8 @@ export default function WallpaperTool() {
             )}
           </div>
         </div>
+      )}
+        </>
       )}
     </ToolPage>
   );
