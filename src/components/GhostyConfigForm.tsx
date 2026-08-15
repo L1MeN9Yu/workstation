@@ -375,7 +375,7 @@ export default function GhostyConfigForm({ content }: Props) {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="rounded-md bg-blue-600 px-4 py-1.5 text-sm text-white disabled:opacity-50"
+          className="rounded-md bg-accent-600 px-4 py-1.5 text-sm text-white disabled:opacity-50"
         >
           {saving ? "保存中..." : "保存"}
         </button>

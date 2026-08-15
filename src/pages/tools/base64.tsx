@@ -25,7 +25,7 @@ export default function Base64Tool() {
             onClick={() => setMode(m)}
             className={`rounded-md px-3 py-1 text-sm ${
               mode === m
-                ? "bg-blue-600 text-white"
+                ? "bg-accent-600 text-white"
                 : "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
             }`}
           >

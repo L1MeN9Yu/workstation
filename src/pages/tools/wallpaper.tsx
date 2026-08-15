@@ -695,7 +695,7 @@ export default function WallpaperTool() {
             onClick={() => setView("search")}
             className={`rounded-md px-3 py-1 text-sm ${
               view === "search"
-                ? "bg-blue-600 text-white"
+                ? "bg-accent-600 text-white"
                 : "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
             }`}
           >
@@ -705,7 +705,7 @@ export default function WallpaperTool() {
             onClick={() => setView("library")}
             className={`rounded-md px-3 py-1 text-sm ${
               view === "library"
-                ? "bg-blue-600 text-white"
+                ? "bg-accent-600 text-white"
                 : "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
             }`}
           >
@@ -714,7 +714,7 @@ export default function WallpaperTool() {
         </div>
         <button
           onClick={() => setShowSettings((v) => !v)}
-          className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white"
+          className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white"
         >
           设置
         </button>
@@ -735,7 +735,7 @@ export default function WallpaperTool() {
               }}
               className={`rounded-md px-3 py-1 text-sm ${
                 source === s.id
-                  ? "bg-blue-600 text-white"
+                  ? "bg-accent-600 text-white"
                   : "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
               }`}
             >
@@ -752,7 +752,7 @@ export default function WallpaperTool() {
             href={meta.homepage}
             target="_blank"
             rel="noreferrer"
-            className="text-sm text-blue-600 underline hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+            className="text-sm text-accent-600 underline hover:text-accent-800 dark:text-accent-400 dark:hover:text-accent-300"
           >
             {meta.label} 官网
           </a>
@@ -808,7 +808,7 @@ export default function WallpaperTool() {
           </label>
           <button
             onClick={() => void handleSaveSettings()}
-            className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white"
+            className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white"
           >
             保存设置
           </button>
@@ -1012,7 +1012,7 @@ export default function WallpaperTool() {
         <button
           onClick={() => void handleSearch(false)}
           disabled={searching || !settings}
-          className="rounded-md bg-blue-600 px-4 py-1 text-sm text-white disabled:opacity-50"
+          className="rounded-md bg-accent-600 px-4 py-1 text-sm text-white disabled:opacity-50"
         >
           {searching ? "搜索中..." : "搜索"}
         </button>
@@ -1074,7 +1074,7 @@ export default function WallpaperTool() {
                       void handleApply(item);
                     }}
                     disabled={applyingId === item.id}
-                    className="rounded-md bg-blue-600 px-2 py-0.5 text-white disabled:opacity-50"
+                    className="rounded-md bg-accent-600 px-2 py-0.5 text-white disabled:opacity-50"
                   >
                     {applyingId === item.id ? "应用中..." : "下载并应用"}
                   </button>
@@ -1178,7 +1178,7 @@ export default function WallpaperTool() {
                 <span>预览加载失败：{previewError}</span>
                 <button
                   onClick={() => void handleRetryPreview()}
-                  className="rounded-md bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-500"
+                  className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white hover:bg-accent-500"
                 >
                   重试
                 </button>
@@ -1213,7 +1213,7 @@ export default function WallpaperTool() {
             <button
               onClick={() => void handleApply(previewItem)}
               disabled={applyingId === previewItem.id}
-              className="rounded-md bg-blue-600 px-2 py-1 text-white disabled:opacity-50"
+              className="rounded-md bg-accent-600 px-2 py-1 text-white disabled:opacity-50"
             >
               {applyingId === previewItem.id ? "应用中..." : "下载并应用"}
             </button>

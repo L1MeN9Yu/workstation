@@ -49,7 +49,7 @@ export default function CmuxConfig() {
             onClick={() => setTab(t)}
             className={`rounded-md px-3 py-1 text-sm ${
               tab === t
-                ? "bg-blue-600 text-white"
+                ? "bg-accent-600 text-white"
                 : "bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
             }`}
           >
