@@ -70,7 +70,7 @@ jobs:
             --fail-under-lines 99 \
             --lcov --output-path ../coverage/backend.info
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/backend.info,coverage/lcov.info
