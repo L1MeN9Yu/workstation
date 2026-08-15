@@ -248,7 +248,22 @@ describe("Settings theme section", () => {
 
   beforeEach(() => {
     localStorage.clear();
-    useTheme.setState({ theme: "light", accent: "blue", _userTouched: false });
+    useTheme.setState({
+      theme: "light",
+      resolvedTheme: "light",
+      accent: "blue",
+      _userTouched: false,
+    });
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
     document.documentElement.classList.remove("dark");
     delete document.documentElement.dataset.theme;
     delete document.documentElement.dataset.accent;
@@ -266,6 +281,7 @@ describe("Settings theme section", () => {
     expect(container.textContent).toContain("外观");
     expect(container.textContent).toContain("亮色");
     expect(container.textContent).toContain("暗色");
+    expect(container.textContent).toContain("跟随系统");
     expect(container.querySelectorAll("[aria-pressed]").length).toBe(8);
     await act(async () => {
       root.unmount();
@@ -301,6 +317,20 @@ describe("Settings theme section", () => {
     });
   });
 
+  it("switches to follow-system mode from the appearance section", async () => {
+    const root = await renderPage(container);
+    await clickButton(container, "跟随系统");
+    expect(useTheme.getState().theme).toBe("system");
+    expect(useTheme.getState().resolvedTheme).toBe("light");
+    expect(JSON.parse(localStorage.getItem("workstation-theme")!)).toEqual({
+      theme: "system",
+      accent: "blue",
+    });
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("switches accent color from the appearance section", async () => {
     const root = await renderPage(container);
     const green = [...container.querySelectorAll("[aria-pressed]")][1];
@@ -329,6 +359,22 @@ describe("Settings theme section", () => {
     const purple = [...container.querySelectorAll("[aria-pressed]")][2];
     expect(purple.getAttribute("aria-pressed")).toBe("true");
     expect(purple.className).toContain("ring-2");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("highlights follow-system when it is the selected mode", async () => {
+    useTheme.setState({
+      theme: "system",
+      resolvedTheme: "dark",
+      accent: "blue",
+    });
+    const root = await renderPage(container);
+    const systemBtn = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "跟随系统",
+    );
+    expect(systemBtn!.className).toContain("bg-accent-600");
     await act(async () => {
       root.unmount();
     });

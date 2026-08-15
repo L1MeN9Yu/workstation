@@ -5,7 +5,6 @@ import { confirmDialog } from "../lib/confirm";
 import {
   ACCENT_COLORS,
   isHexColor,
-  persistTheme,
   useTheme,
   type AccentColor,
   type PresetAccent,
@@ -65,6 +64,7 @@ function accentToHex(accent: AccentColor): string {
 const MODE_OPTIONS: { value: Theme; label: string }[] = [
   { value: "light", label: "亮色" },
   { value: "dark", label: "暗色" },
+  { value: "system", label: "跟随系统" },
 ];
 
 function ThemeSection() {
@@ -74,7 +74,6 @@ function ThemeSection() {
 
   function selectTheme(mode: Theme) {
     setTheme(mode);
-    persistTheme({ theme: mode, accent });
   }
 
   function chooseAccent(value: AccentColor) {
