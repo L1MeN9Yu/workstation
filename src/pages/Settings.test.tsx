@@ -26,6 +26,18 @@ vi.mock("../lib/confirm", () => ({
   confirmDialog: vi.fn(async () => true),
 }));
 
+vi.mock("../lib/cmuxSetting", () => ({
+  readCmuxSetting: vi.fn(async () => ""),
+  writeCmuxSetting: vi.fn(async () => undefined),
+  detectCmux: vi.fn(async () => ({
+    configuredPath: null,
+    resolvedPath: null,
+    available: false,
+    version: null,
+    error: null,
+  })),
+}));
+
 vi.mock("../lib/toast", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
 }));
@@ -590,6 +602,144 @@ describe("Settings network proxy section", () => {
     await clickButton(container, "保存");
     expect(toast.error).toHaveBeenCalledWith("Error: 代理地址无效");
     expect(container.textContent).not.toContain("代理地址无效");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+});
+
+describe("Settings cmux section", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("loads and displays current cmux path", async () => {
+    const cmuxModule = await import("../lib/cmuxSetting");
+    vi.mocked(cmuxModule.readCmuxSetting).mockResolvedValue(
+      "/opt/homebrew/bin/cmux",
+    );
+    const root = await renderPage(container, "cmux");
+    expect(container.textContent).toContain("cmux 命令路径");
+    const input = container.querySelector("input") as HTMLInputElement;
+    expect(input.value).toBe("/opt/homebrew/bin/cmux");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("saves cmux path and shows success message", async () => {
+    const cmuxModule = await import("../lib/cmuxSetting");
+    const root = await renderPage(container, "cmux");
+    const input = container.querySelector("input") as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(input, "  /custom/cmux  ");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickButton(container, "保存");
+    expect(cmuxModule.writeCmuxSetting).toHaveBeenCalledWith("/custom/cmux");
+    expect(toast.success).toHaveBeenCalledWith("cmux 路径已保存");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows a toast when saving cmux path fails", async () => {
+    const cmuxModule = await import("../lib/cmuxSetting");
+    vi.mocked(cmuxModule.writeCmuxSetting).mockRejectedValue(
+      new Error("写入失败"),
+    );
+    const root = await renderPage(container, "cmux");
+    await clickButton(container, "保存");
+    expect(toast.error).toHaveBeenCalledWith("Error: 写入失败");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows available result after detection", async () => {
+    const cmuxModule = await import("../lib/cmuxSetting");
+    vi.mocked(cmuxModule.detectCmux).mockResolvedValue({
+      configuredPath: null,
+      resolvedPath: "/opt/homebrew/bin/cmux",
+      available: true,
+      version: "cmux 1.2.3",
+      error: null,
+    });
+    const root = await renderPage(container, "cmux");
+    await clickButton(container, "检测");
+    expect(cmuxModule.detectCmux).toHaveBeenCalled();
+    expect(container.textContent).toContain("cmux 可用");
+    expect(container.textContent).toContain("/opt/homebrew/bin/cmux");
+    expect(container.textContent).toContain("cmux 1.2.3");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows unavailable message when detection fails", async () => {
+    const cmuxModule = await import("../lib/cmuxSetting");
+    vi.mocked(cmuxModule.detectCmux).mockResolvedValue({
+      configuredPath: null,
+      resolvedPath: null,
+      available: false,
+      version: null,
+      error: "未找到 cmux 命令，请检查安装与 PATH 或在设置页配置路径",
+    });
+    const root = await renderPage(container, "cmux");
+    await clickButton(container, "检测");
+    expect(container.textContent).toContain("cmux 不可用");
+    expect(container.textContent).toContain("未找到 cmux 命令");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows a toast when detection throws", async () => {
+    const cmuxModule = await import("../lib/cmuxSetting");
+    vi.mocked(cmuxModule.detectCmux).mockRejectedValue(new Error("检测失败"));
+    const root = await renderPage(container, "cmux");
+    await clickButton(container, "检测");
+    expect(toast.error).toHaveBeenCalledWith("Error: 检测失败");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("hides previous result when input changes", async () => {
+    const cmuxModule = await import("../lib/cmuxSetting");
+    vi.mocked(cmuxModule.detectCmux).mockResolvedValue({
+      configuredPath: null,
+      resolvedPath: "/opt/homebrew/bin/cmux",
+      available: true,
+      version: "cmux 1.2.3",
+      error: null,
+    });
+    const root = await renderPage(container, "cmux");
+    await clickButton(container, "检测");
+    expect(container.textContent).toContain("cmux 可用");
+    const input = container.querySelector("input") as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(input, "/other/cmux");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).not.toContain("cmux 可用");
     await act(async () => {
       root.unmount();
     });

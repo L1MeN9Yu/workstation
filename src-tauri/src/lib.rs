@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::ser::SerializeStruct;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod fonts;
@@ -173,18 +173,170 @@ enum CmuxRunError {
     Other(String),
 }
 
-fn run_cmux(args: &[&str]) -> Result<String, CmuxRunError> {
-    run_command("cmux", args)
+/// cmux 命令路径配置（config key: `cmux`，字段序列化为 camelCase）。
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CmuxSetting {
+    #[serde(default)]
+    pub bin_path: String,
 }
 
-fn run_command(program: &str, args: &[&str]) -> Result<String, CmuxRunError> {
+/// 解析 cmux 路径配置值：Null 或缺失视为未配置，返回 None。
+pub fn parse_cmux_setting(value: Value) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let s: CmuxSetting = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    Ok(Some(s.bin_path))
+}
+
+pub fn read_cmux_setting_impl() -> Result<Option<String>, String> {
+    read_cmux_setting_from(|| read_config("cmux".to_string()))
+}
+
+fn read_cmux_setting_from(
+    reader: impl FnOnce() -> Result<Value, String>,
+) -> Result<Option<String>, String> {
+    let value = reader()?;
+    parse_cmux_setting(value)
+}
+
+pub fn write_cmux_setting_at(key: &str, bin_path: &str) -> Result<(), String> {
+    write_config(key.to_string(), serde_json::json!({ "binPath": bin_path }))
+}
+
+pub fn write_cmux_setting_impl(bin_path: &str) -> Result<(), String> {
+    write_cmux_setting_at("cmux", bin_path)
+}
+
+/// macOS 常见 cmux 安装位置（GUI 应用 PATH 不含用户 shell 目录时兜底探测）。
+pub const CMUX_CANDIDATES: [&str; 3] = [
+    "/opt/homebrew/bin/cmux",
+    "/usr/local/bin/cmux",
+    "/Applications/cmux.app/Contents/Resources/bin/cmux",
+];
+
+/// 按「配置路径 → PATH → 常见安装位置」解析 cmux 可执行文件路径。
+pub fn cmux_bin_with(configured: Option<String>) -> Option<PathBuf> {
+    if let Some(p) = configured.filter(|p| !p.trim().is_empty()) {
+        return Some(PathBuf::from(p.trim()));
+    }
+    cmux_bin_from_path(std::env::var_os("PATH"))
+}
+
+pub fn cmux_bin_from_path(path_env: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    cmux_bin_from_parts(path_env, &CMUX_CANDIDATES)
+}
+
+fn cmux_bin_from_parts(
+    path_env: Option<std::ffi::OsString>,
+    candidates: &[&str],
+) -> Option<PathBuf> {
+    cmux_in_path_from(path_env).or_else(|| cmux_candidate_from(candidates))
+}
+
+/// 在 PATH 枚举目录中查找名为 `cmux` 的文件。
+fn cmux_in_path_from(path_env: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let path_env = path_env?;
+    std::env::split_paths(&path_env)
+        .map(|dir| dir.join("cmux"))
+        .find(|p| p.is_file())
+}
+
+/// 在候选安装位置中取第一个存在的 cmux。
+fn cmux_candidate_from(candidates: &[&str]) -> Option<PathBuf> {
+    candidates.iter().map(PathBuf::from).find(|p| p.is_file())
+}
+
+/// cmux 可执行文件解析结果（camelCase 序列化供前端展示）。
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectCmuxResult {
+    pub configured_path: Option<String>,
+    pub resolved_path: Option<String>,
+    pub available: bool,
+    pub version: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 检测 cmux 路径：解析实际路径并执行 `cmux --version` 验证可用性。
+pub fn detect_cmux_impl() -> Result<DetectCmuxResult, String> {
+    detect_cmux_from(read_cmux_setting_impl, run_cmux_version)
+}
+
+fn detect_cmux_from(
+    reader: impl Fn() -> Result<Option<String>, String>,
+    run_version: impl Fn(&Path) -> Result<String, String>,
+) -> Result<DetectCmuxResult, String> {
+    let configured = reader()?;
+    Ok(detect_cmux_with(configured, cmux_bin_with, run_version))
+}
+
+fn detect_cmux_with(
+    configured: Option<String>,
+    resolve: impl Fn(Option<String>) -> Option<PathBuf>,
+    run_version: impl Fn(&Path) -> Result<String, String>,
+) -> DetectCmuxResult {
+    let Some(bin) = resolve(configured.clone()) else {
+        return DetectCmuxResult {
+            configured_path: configured,
+            resolved_path: None,
+            available: false,
+            version: None,
+            error: Some("未找到 cmux 命令，请检查安装与 PATH 或在设置页配置路径".to_string()),
+        };
+    };
+    let resolved = bin.display().to_string();
+    match run_version(&bin) {
+        Ok(version) => DetectCmuxResult {
+            configured_path: configured,
+            resolved_path: Some(resolved),
+            available: true,
+            version: Some(version),
+            error: None,
+        },
+        Err(e) => DetectCmuxResult {
+            configured_path: configured,
+            resolved_path: Some(resolved),
+            available: false,
+            version: None,
+            error: Some(e),
+        },
+    }
+}
+
+fn run_cmux_version(bin: &Path) -> Result<String, String> {
+    match run_command(bin, &["--version"]) {
+        Ok(out) => Ok(out.lines().next().unwrap_or_default().trim().to_string()),
+        Err(CmuxRunError::NotFound) => Err("路径不存在或不可执行".to_string()),
+        Err(CmuxRunError::Other(e)) => Err(e),
+    }
+}
+
+fn run_cmux(args: &[&str]) -> Result<String, CmuxRunError> {
+    run_cmux_bin(args, cmux_bin_with(read_cmux_setting_impl().ok().flatten()))
+}
+
+fn run_cmux_bin(args: &[&str], bin: Option<PathBuf>) -> Result<String, CmuxRunError> {
+    match bin {
+        Some(bin) => run_command(&bin, args),
+        None => Err(CmuxRunError::NotFound),
+    }
+}
+
+fn run_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    args: &[&str],
+) -> Result<String, CmuxRunError> {
+    let program = program.as_ref();
+    let display = program.to_string_lossy();
     match Command::new(program).args(args).output() {
         Err(e) if e.kind() == ErrorKind::NotFound => Err(CmuxRunError::NotFound),
         Err(e) => Err(CmuxRunError::Other(e.to_string())),
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
         Ok(out) => Err(CmuxRunError::Other(format!(
             "{} {} failed with {}: {}",
-            program,
+            display,
             args.join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
@@ -231,6 +383,10 @@ mod tests {
             std::env::temp_dir().join(format!("workstation-test-{name}-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn fake_version(_bin: &Path) -> Result<String, String> {
+        Ok("cmux 1.0.0".to_string())
     }
 
     #[test]
@@ -639,7 +795,7 @@ mod tests {
     #[test]
     fn run_command_spawn_failure_is_other_error() {
         let dir = temp_dir("run-command-spawn");
-        let err = run_command(&dir.display().to_string(), &[]).unwrap_err();
+        let err = run_command(dir.display().to_string(), &[]).unwrap_err();
         assert!(matches!(err, CmuxRunError::Other(_)));
     }
 
@@ -672,5 +828,279 @@ mod tests {
                 | CmuxReloadStatus::CliMissing
                 | CmuxReloadStatus::Failed(_)
         ));
+    }
+
+    #[test]
+    fn parse_cmux_setting_null_means_unconfigured() {
+        assert_eq!(parse_cmux_setting(Value::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_cmux_setting_reads_bin_path() {
+        let value = serde_json::json!({ "binPath": "/custom/cmux" });
+        assert_eq!(
+            parse_cmux_setting(value).unwrap(),
+            Some("/custom/cmux".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_cmux_setting_missing_bin_path_yields_empty() {
+        assert_eq!(
+            parse_cmux_setting(serde_json::json!({})).unwrap(),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn parse_cmux_setting_rejects_invalid_shape() {
+        let err = parse_cmux_setting(serde_json::json!({ "binPath": 42 })).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn write_cmux_setting_at_roundtrips() {
+        let key = "__workstation_cmux_setting_test__";
+        write_cmux_setting_at(key, "/tmp/cmux-bin").unwrap();
+        let read = read_config(key.to_string()).unwrap();
+        assert_eq!(read, serde_json::json!({ "binPath": "/tmp/cmux-bin" }));
+        let path = config_path(key).unwrap();
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_cmux_setting_impl_roundtrips_then_restores() {
+        let key_path = config_path("cmux").unwrap();
+        let original = fs::read_to_string(&key_path).ok();
+        write_cmux_setting_impl("/tmp/test-cmux-bin").unwrap();
+        let read = read_config("cmux".to_string()).unwrap();
+        assert_eq!(read, serde_json::json!({ "binPath": "/tmp/test-cmux-bin" }));
+        restore_setting_file(&key_path, original);
+    }
+
+    #[test]
+    fn restore_setting_file_restores_existing_content() {
+        let dir = temp_dir("restore-setting");
+        let path = dir.join("cmux.json");
+        fs::write(&path, "original").unwrap();
+        restore_setting_file(&path, Some("original".to_string()));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    fn restore_setting_file(key_path: &Path, original: Option<String>) {
+        match original {
+            Some(content) => fs::write(key_path, content).unwrap(),
+            None => {
+                let _ = fs::remove_file(key_path);
+            }
+        }
+    }
+
+    #[test]
+    fn cmux_bin_with_uses_configured_path() {
+        let found = cmux_bin_with(Some("  /custom/cmux  ".to_string()));
+        assert_eq!(found, Some(PathBuf::from("/custom/cmux")));
+    }
+
+    #[test]
+    fn cmux_bin_with_falls_through_on_blank_config() {
+        let found = cmux_bin_with(Some("   ".to_string()));
+        assert!(found.is_some() == cmux_bin_with(None).is_some());
+    }
+
+    #[test]
+    fn cmux_bin_from_parts_falls_back_to_candidates() {
+        let dir = temp_dir("cmux-parts");
+        let existing = dir.join("cmux");
+        fs::write(&existing, "").unwrap();
+        let candidates = [existing.display().to_string()];
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        let path = dir.join("bin").display().to_string();
+        let found = cmux_bin_from_parts(Some(std::ffi::OsString::from(path)), &refs);
+        assert_eq!(found, Some(existing));
+    }
+
+    #[test]
+    fn cmux_bin_from_parts_prefers_path_entry() {
+        let dir = temp_dir("cmux-parts-path");
+        let bin_dir = dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let path_bin = bin_dir.join("cmux");
+        fs::write(&path_bin, "").unwrap();
+        let candidates = [dir.join("nope").display().to_string()];
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        let found = cmux_bin_from_parts(
+            Some(std::ffi::OsString::from(bin_dir.display().to_string())),
+            &refs,
+        );
+        assert_eq!(found, Some(path_bin));
+    }
+
+    #[test]
+    fn read_cmux_setting_from_propagates_reader_error() {
+        let err = read_cmux_setting_from(|| Err("read failed".to_string())).unwrap_err();
+        assert_eq!(err, "read failed");
+    }
+
+    #[test]
+    fn read_cmux_setting_from_parses_null_as_unconfigured() {
+        let result = read_cmux_setting_from(|| Ok(Value::Null)).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn cmux_in_path_from_finds_first_match() {
+        let dir = temp_dir("cmux-path");
+        let first = dir.join("cmux");
+        fs::write(&first, "").unwrap();
+        let other = dir.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let path = std::env::join_paths([&other, &dir]).unwrap();
+        assert_eq!(cmux_in_path_from(Some(path)), Some(first));
+    }
+
+    #[test]
+    fn cmux_in_path_from_returns_none_when_missing_or_absent() {
+        assert_eq!(cmux_in_path_from(None), None);
+        let dir = temp_dir("cmux-path-missing");
+        let path = std::env::join_paths([dir.join("bin")]).unwrap();
+        assert_eq!(cmux_in_path_from(Some(path)), None);
+    }
+
+    #[test]
+    fn cmux_candidate_from_picks_first_existing() {
+        let dir = temp_dir("cmux-candidate");
+        let existing = dir.join("cmux");
+        fs::write(&existing, "").unwrap();
+        let candidates = [
+            dir.join("missing").display().to_string(),
+            existing.display().to_string(),
+        ];
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        assert_eq!(cmux_candidate_from(&refs), Some(existing));
+    }
+
+    #[test]
+    fn cmux_candidate_from_returns_none_when_all_missing() {
+        let dir = temp_dir("cmux-candidate-missing");
+        let candidates = [
+            dir.join("a").display().to_string(),
+            dir.join("b").display().to_string(),
+        ];
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        assert_eq!(cmux_candidate_from(&refs), None);
+    }
+
+    #[test]
+    fn detect_cmux_with_reports_unavailable_when_not_resolved() {
+        let result = detect_cmux_with(Some("/custom/cmux".to_string()), |_| None, fake_version);
+        assert_eq!(result.configured_path, Some("/custom/cmux".to_string()));
+        assert_eq!(result.resolved_path, None);
+        assert!(!result.available);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn detect_cmux_with_reports_available_with_version() {
+        let result = detect_cmux_with(None, |_| Some(PathBuf::from("/custom/cmux")), fake_version);
+        assert!(result.available);
+        assert_eq!(result.version, Some("cmux 1.0.0".to_string()));
+        assert_eq!(result.error, None);
+        assert_eq!(result.resolved_path, Some("/custom/cmux".to_string()));
+    }
+
+    #[test]
+    fn detect_cmux_with_reports_error_from_version_probe() {
+        let result = detect_cmux_with(
+            None,
+            |_| Some(PathBuf::from("/custom/cmux")),
+            |_| Err("boom".to_string()),
+        );
+        assert!(!result.available);
+        assert_eq!(result.error, Some("boom".to_string()));
+        assert_eq!(result.version, None);
+    }
+
+    #[test]
+    fn detect_cmux_from_propagates_reader_error() {
+        let err = detect_cmux_from(|| Err("config broken".to_string()), fake_version).unwrap_err();
+        assert_eq!(err, "config broken");
+    }
+
+    #[test]
+    fn detect_cmux_from_resolves_configured_path() {
+        let result =
+            detect_cmux_from(|| Ok(Some("/custom/cmux".to_string())), fake_version).unwrap();
+        assert!(result.available);
+        assert_eq!(result.resolved_path, Some("/custom/cmux".to_string()));
+        assert_eq!(result.version, Some("cmux 1.0.0".to_string()));
+    }
+
+    #[test]
+    fn detect_cmux_impl_runs_without_panic() {
+        // 环境无关：真实配置缺失/损坏时都能产出结果或错误，不 panic。
+        let _ = detect_cmux_impl();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_cmux_bin_uses_resolved_binary() {
+        let dir = temp_dir("run-cmux-bin");
+        let bin = dir.join("cmux");
+        fs::write(&bin, "#!/bin/sh\necho ok\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = run_cmux_bin(&["ping"], Some(bin.clone())).unwrap();
+        assert_eq!(out.trim(), "ok");
+    }
+
+    #[test]
+    fn run_cmux_bin_reports_not_found_without_binary() {
+        let err = run_cmux_bin(&["ping"], None).unwrap_err();
+        assert_eq!(err, CmuxRunError::NotFound);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_cmux_version_ok_returns_first_line() {
+        // 脚本无任何 stdout：覆盖 lines() 返回 None（空输出）的分支。
+        let dir = temp_dir("cmux-version-empty");
+        let script = dir.join("silent-cmux");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = run_cmux_version(&script).unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_cmux_version_ok_returns_stdout_head() {
+        let dir = temp_dir("cmux-version-head");
+        let script = dir.join("fake-cmux");
+        fs::write(&script, "#!/bin/sh\nprintf 'cmux 9.9.9\\ntrailing\\n'\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = run_cmux_version(&script).unwrap();
+        assert_eq!(out, "cmux 9.9.9");
+    }
+
+    #[test]
+    fn run_cmux_version_missing_is_not_found() {
+        let err = run_cmux_version(Path::new("/workstation-no-such-cmux-xyz")).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn run_cmux_version_spawn_failure_is_other() {
+        let dir = temp_dir("cmux-version-spawn");
+        let err = run_cmux_version(&dir).unwrap_err();
+        assert!(!err.is_empty());
     }
 }

@@ -15,14 +15,14 @@ use crate::{
     iterm2_remote::{
         merge_remote_keys, parse_iterm2_keys_html, parse_profile_model_keys, Iterm2RemoteKey,
     },
-    read_cmux_config_at, read_config as read_config_impl, read_ghosty_config_at,
-    reload_cmux_config_impl,
+    read_cmux_config_at, read_cmux_setting_impl, read_config as read_config_impl,
+    read_ghosty_config_at, reload_cmux_config_impl,
     wallpaper::{
         self, DeleteWallpapersResult, LocalWallpaperInfo, SearchQuery, SourceSettings, ThumbState,
         WallpaperItem, WallpaperSettings,
     },
-    write_cmux_config_at, write_config as write_config_impl, write_ghosty_config_at,
-    CmuxConfigFile, CmuxReloadStatus,
+    write_cmux_config_at, write_cmux_setting_impl, write_config as write_config_impl,
+    write_ghosty_config_at, CmuxConfigFile, CmuxReloadStatus, DetectCmuxResult,
 };
 
 #[tauri::command]
@@ -118,6 +118,23 @@ pub async fn list_system_fonts(app: AppHandle) -> Vec<String> {
 #[tauri::command]
 pub fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
     reload_cmux_config_impl()
+}
+
+#[tauri::command]
+pub fn read_cmux_setting() -> Result<Option<String>, String> {
+    read_cmux_setting_impl()
+}
+
+#[tauri::command]
+pub fn write_cmux_setting(bin_path: String) -> Result<(), String> {
+    write_cmux_setting_impl(&bin_path)
+}
+
+#[tauri::command]
+pub async fn detect_cmux() -> Result<DetectCmuxResult, String> {
+    tauri::async_runtime::spawn_blocking(crate::detect_cmux_impl)
+        .await
+        .map_err(|e| format!("cmux detect task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -400,6 +417,9 @@ pub fn run() {
             write_cmux_config,
             write_ghosty_config,
             reload_cmux_config,
+            read_cmux_setting,
+            write_cmux_setting,
+            detect_cmux,
             fetch_ghosty_keys,
             fetch_iterm2_keys,
             list_system_fonts,
