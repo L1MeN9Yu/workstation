@@ -1070,9 +1070,16 @@ mod tests {
 
     #[test]
     fn run_cmux_version_ok_returns_first_line() {
-        // /usr/bin/true ignores arguments, exits 0, and prints nothing:
-        // covers the empty-stdout (None from lines()) path.
-        let out = run_cmux_version(Path::new("/usr/bin/true")).unwrap();
+        // 脚本无任何 stdout：覆盖 lines() 返回 None（空输出）的分支。
+        let dir = temp_dir("cmux-version-empty");
+        let script = dir.join("silent-cmux");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = run_cmux_version(&script).unwrap();
         assert_eq!(out, "");
     }
 
