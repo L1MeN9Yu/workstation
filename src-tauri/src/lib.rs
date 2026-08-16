@@ -955,22 +955,16 @@ mod tests {
         fs::write(&first, "").unwrap();
         let other = dir.join("other");
         fs::create_dir_all(&other).unwrap();
-        let path = format!("{}:{}", other.display(), dir.display());
-        assert_eq!(
-            cmux_in_path_from(Some(std::ffi::OsString::from(path))),
-            Some(first)
-        );
+        let path = std::env::join_paths([&other, &dir]).unwrap();
+        assert_eq!(cmux_in_path_from(Some(path)), Some(first));
     }
 
     #[test]
     fn cmux_in_path_from_returns_none_when_missing_or_absent() {
         assert_eq!(cmux_in_path_from(None), None);
         let dir = temp_dir("cmux-path-missing");
-        let path = format!("{}:/usr/bin", dir.display());
-        assert_eq!(
-            cmux_in_path_from(Some(std::ffi::OsString::from(path))),
-            None
-        );
+        let path = std::env::join_paths([dir.join("bin")]).unwrap();
+        assert_eq!(cmux_in_path_from(Some(path)), None);
     }
 
     #[test]
@@ -1049,11 +1043,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_cmux_bin_uses_resolved_binary() {
         let dir = temp_dir("run-cmux-bin");
         let bin = dir.join("cmux");
         fs::write(&bin, "#!/bin/sh\necho ok\n").unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1069,12 +1063,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_cmux_version_ok_returns_first_line() {
         // 脚本无任何 stdout：覆盖 lines() 返回 None（空输出）的分支。
         let dir = temp_dir("cmux-version-empty");
         let script = dir.join("silent-cmux");
         fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1084,11 +1078,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_cmux_version_ok_returns_stdout_head() {
         let dir = temp_dir("cmux-version-head");
         let script = dir.join("fake-cmux");
         fs::write(&script, "#!/bin/sh\nprintf 'cmux 9.9.9\\ntrailing\\n'\n").unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
