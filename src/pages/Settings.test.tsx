@@ -5,6 +5,7 @@ import type { Update } from "@tauri-apps/plugin-updater";
 import Settings from "./Settings";
 import { useUpdateStore } from "../store/update";
 import { useTheme } from "../store/theme";
+import { relaunch } from "../lib/updater";
 
 vi.mock("../lib/updater", () => ({
   isTauriRuntime: vi.fn(() => true),
@@ -13,6 +14,7 @@ vi.mock("../lib/updater", () => ({
     check: vi.fn(async () => null),
   })),
   downloadWithProgress: vi.fn(async () => undefined),
+  relaunch: vi.fn(async () => undefined),
 }));
 
 vi.mock("../lib/proxy", () => ({
@@ -112,6 +114,7 @@ describe("Settings update section", () => {
   afterEach(() => {
     container.remove();
     vi.clearAllMocks();
+    vi.mocked(relaunch).mockResolvedValue(undefined);
   });
 
   it("renders the update section with check button and unknown version", async () => {
@@ -180,6 +183,30 @@ describe("Settings update section", () => {
     );
     expect(useUpdateStore.getState().status).toBe("ready");
     expect(useUpdateStore.getState().downloadedBytes).toBe(1000);
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows relaunch failure message when relaunch throws", async () => {
+    const updater = await import("../lib/updater");
+    vi.mocked(updater.createUpdateApi).mockReturnValue({
+      check: vi.fn(async () => ({ version: "0.2.0" }) as unknown as Update),
+    });
+    vi.mocked(updater.downloadWithProgress).mockImplementation(
+      async (_update, listener) => {
+        listener(0, 1000);
+        listener(1000, 1000);
+      },
+    );
+    vi.mocked(updater.relaunch).mockRejectedValue(new Error("restart denied"));
+    vi.mocked(confirmDialog).mockResolvedValue(true);
+    const root = await renderPage(container, "应用更新");
+    await clickButton(container, "检查更新");
+    await clickButton(container, "下载并安装");
+    expect(container.textContent).toContain("更新已下载但重启失败");
+    expect(container.textContent).toContain("restart denied");
+    expect(useUpdateStore.getState().status).toBe("ready");
     await act(async () => {
       root.unmount();
     });

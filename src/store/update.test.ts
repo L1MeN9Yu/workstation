@@ -13,6 +13,7 @@ function installUpdaterMock(overrides: Record<string, unknown> = {}) {
       check: vi.fn(async () => null),
     })),
     downloadWithProgress: vi.fn(async () => undefined),
+    relaunch: vi.fn(async () => undefined),
     ...overrides,
   }));
 }
@@ -198,6 +199,54 @@ describe("update store", () => {
     expect(useUpdateStore.getState().status).toBe("error");
     await useUpdateStore.getState().downloadAndInstall();
     expect(useUpdateStore.getState().status).toBe("ready");
+  });
+
+  it("downloadAndInstall relaunches the app after download", async () => {
+    const relaunchMock = vi.fn(async () => undefined);
+    installUpdaterMock({
+      createUpdateApi: vi.fn(() => ({
+        check: vi.fn(async () => fakeUpdate),
+      })),
+      relaunch: relaunchMock,
+    });
+    const { useUpdateStore } = await loadStore();
+    await useUpdateStore.getState().downloadAndInstall();
+    expect(relaunchMock).toHaveBeenCalledTimes(1);
+    expect(useUpdateStore.getState().status).toBe("ready");
+    expect(useUpdateStore.getState().errorMessage).toBeNull();
+  });
+
+  it("relaunch failure stays ready with restart error message", async () => {
+    installUpdaterMock({
+      createUpdateApi: vi.fn(() => ({
+        check: vi.fn(async () => fakeUpdate),
+      })),
+      relaunch: vi.fn(async () => {
+        throw new Error("relaunch rejected");
+      }),
+    });
+    const { useUpdateStore } = await loadStore();
+    await useUpdateStore.getState().downloadAndInstall();
+    expect(useUpdateStore.getState().status).toBe("ready");
+    expect(useUpdateStore.getState().errorMessage).toContain("更新已下载但重启失败");
+    expect(useUpdateStore.getState().errorMessage).toContain("relaunch rejected");
+  });
+
+  it("download failure does not trigger relaunch", async () => {
+    const relaunchMock = vi.fn(async () => undefined);
+    installUpdaterMock({
+      createUpdateApi: vi.fn(() => ({
+        check: vi.fn(async () => fakeUpdate),
+      })),
+      downloadWithProgress: vi.fn(async () => {
+        throw new Error("download interrupted");
+      }),
+      relaunch: relaunchMock,
+    });
+    const { useUpdateStore } = await loadStore();
+    await useUpdateStore.getState().downloadAndInstall();
+    expect(useUpdateStore.getState().status).toBe("error");
+    expect(relaunchMock).not.toHaveBeenCalled();
   });
 
   it("re-entrant downloadAndInstall while downloading is ignored", async () => {

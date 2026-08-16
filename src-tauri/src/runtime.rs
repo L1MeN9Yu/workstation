@@ -41,6 +41,11 @@ pub fn app_version(app: AppHandle) -> String {
 }
 
 #[tauri::command]
+pub fn relaunch_app(app: AppHandle) {
+    app.restart();
+}
+
+#[tauri::command]
 pub fn read_cmux_config() -> Result<CmuxConfigFile, String> {
     let path = cmux_config_path().ok_or_else(|| "cannot resolve cmux config dir".to_string())?;
     read_cmux_config_at(&path)
@@ -389,6 +394,7 @@ pub fn run() {
             read_config,
             write_config,
             app_version,
+            relaunch_app,
             read_cmux_config,
             read_ghosty_config,
             write_cmux_config,

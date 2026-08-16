@@ -17,6 +17,7 @@ import {
   currentAppVersion,
   createUpdateApi,
   downloadWithProgress,
+  relaunch,
 } from "./updater";
 
 describe("updater lib", () => {
@@ -49,6 +50,25 @@ describe("updater lib", () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     invokeMock.mockRejectedValue(new Error("not available"));
     expect(await currentAppVersion()).toBeNull();
+  });
+
+  it("relaunch rejects outside Tauri runtime without invoking", async () => {
+    await expect(relaunch()).rejects.toThrow("不支持重启应用");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("relaunch invokes relaunch_app inside Tauri runtime", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+    invokeMock.mockResolvedValue(undefined);
+    await expect(relaunch()).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("relaunch_app");
+  });
+
+  it("relaunch propagates invoke failure", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+    invokeMock.mockRejectedValue(new Error("relaunch failed"));
+    await expect(relaunch()).rejects.toThrow("relaunch failed");
+    expect(invokeMock).toHaveBeenCalledWith("relaunch_app");
   });
 
   it("createUpdateApi exposes the plugin check function", () => {

@@ -307,6 +307,14 @@ function UpdateSection() {
       {status === "ready" && (
         <div className="mb-3 text-sm text-green-600 dark:text-green-400">
           更新已下载，应用即将自动重启并安装。
+          {errorMessage && (
+            <div
+              data-testid="update-relaunch-error"
+              className="mt-1 text-red-500 dark:text-red-400"
+            >
+              {errorMessage}
+            </div>
+          )}
         </div>
       )}
 
