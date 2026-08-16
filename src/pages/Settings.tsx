@@ -5,6 +5,12 @@ import { confirmDialog } from "../lib/confirm";
 import { toast } from "../lib/toast";
 import Button from "../components/Button";
 import {
+  readCmuxSetting,
+  writeCmuxSetting,
+  detectCmux,
+  type DetectCmuxResult,
+} from "../lib/cmuxSetting";
+import {
   ACCENT_COLORS,
   isHexColor,
   useTheme,
@@ -354,12 +360,110 @@ function UpdateSection() {
   );
 }
 
-type SettingsTab = "appearance" | "update" | "proxy";
+function CmuxSection() {
+  const [binPath, setBinPath] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [result, setResult] = useState<DetectCmuxResult | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void readCmuxSetting().then((value) => {
+      if (!cancelled) setBinPath(value ?? "");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleSave() {
+    if (binPath === null) return;
+    setSaving(true);
+    try {
+      await writeCmuxSetting(binPath.trim());
+      toast.success("cmux 路径已保存");
+      setResult(null);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDetect() {
+    setDetecting(true);
+    setResult(null);
+    try {
+      setResult(await detectCmux());
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setDetecting(false);
+    }
+  }
+
+  return (
+    <section className="max-w-xl rounded-lg border border-gray-200 p-4 dark:border-gray-700">
+      <h3 className="mb-1 text-sm font-semibold">cmux 命令路径</h3>
+      <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+        GUI 应用的环境 PATH 不含用户 shell 目录，找不到 cmux 时在此填写绝对路径；
+        留空表示自动查找（PATH 与常见安装位置）。
+      </p>
+      <label className="block text-sm">
+        可执行文件路径
+        <input
+          value={binPath ?? ""}
+          onChange={(e) => {
+            setBinPath(e.target.value);
+            setResult(null);
+          }}
+          placeholder="留空自动查找，如 /opt/homebrew/bin/cmux"
+          className="mt-1 w-full rounded-md border border-gray-200 bg-gray-50 px-2 py-1 font-mono text-sm dark:border-gray-700 dark:bg-gray-900"
+        />
+      </label>
+      <div className="mt-3 flex items-center gap-2">
+        <Button
+          variant="secondary"
+          onClick={handleSave}
+          disabled={saving || binPath === null}
+          className="px-3 py-1"
+        >
+          {saving ? "保存中..." : "保存"}
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={handleDetect}
+          disabled={detecting}
+          className="px-3 py-1"
+        >
+          {detecting ? "检测中..." : "检测"}
+        </Button>
+      </div>
+      {result && (
+        <div className="mt-3 text-sm">
+          {result.available ? (
+            <div className="text-green-600 dark:text-green-400">
+              cmux 可用：{result.resolvedPath}
+              {result.version ? `（${result.version}）` : ""}
+            </div>
+          ) : (
+            <div className="text-red-500 dark:text-red-400">
+              cmux 不可用：{result.error ?? "未找到 cmux 命令"}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type SettingsTab = "appearance" | "update" | "proxy" | "cmux";
 
 const TAB_OPTIONS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "外观" },
   { id: "update", label: "应用更新" },
   { id: "proxy", label: "网络代理" },
+  { id: "cmux", label: "cmux" },
 ];
 
 export default function Settings() {
@@ -385,6 +489,7 @@ export default function Settings() {
       {tab === "appearance" && <ThemeSection />}
       {tab === "update" && <UpdateSection />}
       {tab === "proxy" && <ProxySection />}
+      {tab === "cmux" && <CmuxSection />}
     </ToolPage>
   );
 }
