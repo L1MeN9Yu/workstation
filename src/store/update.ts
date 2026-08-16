@@ -4,6 +4,7 @@ import {
   currentAppVersion,
   downloadWithProgress,
   isTauriRuntime,
+  relaunch,
 } from "../lib/updater";
 import { getGlobalProxy } from "../lib/proxy";
 
@@ -96,6 +97,15 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       await downloadWithProgress(update, (downloadedBytes, totalBytes) => {
         set({ downloadedBytes, totalBytes });
       });
+      try {
+        await relaunch();
+      } catch (e) {
+        set({
+          status: "ready",
+          errorMessage: `更新已下载但重启失败：${String(e)}`,
+        });
+        return;
+      }
       set({ status: "ready" });
     } catch (e) {
       set({ status: "error", errorMessage: String(e) });

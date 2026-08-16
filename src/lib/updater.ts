@@ -26,6 +26,13 @@ export async function currentAppVersion(): Promise<string | null> {
   }
 }
 
+export function relaunch(): Promise<void> {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("当前环境不支持重启应用"));
+  }
+  return invoke<void>("relaunch_app");
+}
+
 export type ProgressListener = (downloadedBytes: number, totalBytes: number) => void;
 
 export function downloadWithProgress(
