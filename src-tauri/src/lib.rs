@@ -887,6 +887,15 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     }
 
+    #[test]
+    fn restore_setting_file_removes_when_none() {
+        let dir = temp_dir("restore-setting-none");
+        let path = dir.join("cmux.json");
+        fs::write(&path, "original").unwrap();
+        restore_setting_file(&path, None);
+        assert!(!path.exists());
+    }
+
     fn restore_setting_file(key_path: &Path, original: Option<String>) {
         match original {
             Some(content) => fs::write(key_path, content).unwrap(),
