@@ -69,11 +69,6 @@ jobs:
             --ignore-filename-regex 'runtime\.rs' \
             --fail-under-lines 99 \
             --lcov --output-path ../coverage/backend.info
-          cargo llvm-cov report \
-            --ignore-filename-regex 'runtime\.rs' \
-            --show-missing-lines 2>&1 || true
-          echo "--- LCOV UNCOVERED LINES ---"
-          awk '/^SF:/{f=$0} /^DA:/{n=split($0,a,","); if (f!="" && a[n]==0) print f" "$0}' ../coverage/backend.info || true
       - name: Upload to Codecov
         uses: codecov/codecov-action@v6
         with:
