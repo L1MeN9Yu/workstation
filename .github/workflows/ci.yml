@@ -69,6 +69,9 @@ jobs:
             --ignore-filename-regex 'runtime\.rs' \
             --fail-under-lines 99 \
             --lcov --output-path ../coverage/backend.info
+          cargo llvm-cov report \
+            --ignore-filename-regex 'runtime\.rs' \
+            --show-missing-lines 2>&1 || true
       - name: Upload to Codecov
         uses: codecov/codecov-action@v6
         with:
