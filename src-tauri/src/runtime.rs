@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
 use crate::{
@@ -218,6 +219,62 @@ fn read_global_proxy() -> Option<String> {
     }
 }
 
+/// 壁纸缓存池根目录：`<app_cache>/wallpapers`（缩略图 `thumbs/` 与原图 `full/` 的父目录）。
+fn wallpaper_cache_root(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_cache_dir()
+        .map(|d| d.join("wallpapers"))
+        .map_err(|e| format!("cannot resolve app cache dir: {e}"))
+}
+
+/// 将缓存池根目录注入 settings（运行时值，不持久化）。
+fn inject_cache_root(app: &AppHandle, mut settings: WallpaperSettings) -> WallpaperSettings {
+    if let Ok(root) = wallpaper_cache_root(app) {
+        settings.cache_root = Some(root.display().to_string());
+    }
+    settings
+}
+
+/// 判断某张壁纸的原图是否已存在于磁盘缓存（预览打开时据此决定直接展示原图）。
+#[tauri::command]
+pub fn has_wallpaper_full_cache(app: AppHandle, item: WallpaperItem) -> bool {
+    let Ok(root) = wallpaper_cache_root(&app) else {
+        return false;
+    };
+    wallpaper::full_image_cache_get(&root, &wallpaper::thumb_hash(&item.full_url)).is_some()
+}
+
+/// 缓存池占用统计（camelCase 序列化供设置页展示）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperCacheStats {
+    total_bytes: u64,
+    thumb_bytes: u64,
+    full_bytes: u64,
+    limit_bytes: u64,
+}
+
+#[tauri::command]
+pub fn get_wallpaper_cache_stats(app: AppHandle) -> WallpaperCacheStats {
+    let mut settings = wallpaper_settings_from_config();
+    settings = inject_cache_root(&app, settings);
+    let root = wallpaper_cache_root(&app).unwrap_or_default();
+    let (total_bytes, thumb_bytes, full_bytes) = wallpaper::full_image_cache_size(&root);
+    WallpaperCacheStats {
+        total_bytes,
+        thumb_bytes,
+        full_bytes,
+        limit_bytes: settings.cache_limit(),
+    }
+}
+
+/// 清空缓存池（仅缓存文件，不影响本地壁纸库与配置）。
+#[tauri::command]
+pub fn clear_wallpaper_cache(app: AppHandle) -> Result<(), String> {
+    let root = wallpaper_cache_root(&app)?;
+    wallpaper::clear_wallpaper_cache(&root)
+}
+
 #[tauri::command]
 pub async fn search_wallpapers(
     app: AppHandle,
@@ -253,13 +310,15 @@ pub async fn search_wallpapers(
 }
 
 #[tauri::command]
-pub async fn download_wallpaper(item: WallpaperItem) -> Result<String, String> {
-    wallpaper::download_wallpaper(item, wallpaper_settings_from_config()).await
+pub async fn download_wallpaper(app: AppHandle, item: WallpaperItem) -> Result<String, String> {
+    let settings = inject_cache_root(&app, wallpaper_settings_from_config());
+    wallpaper::download_wallpaper(item, settings).await
 }
 
 #[tauri::command]
-pub async fn fetch_full_image(item: WallpaperItem) -> Result<String, String> {
-    let (bytes, mime) = wallpaper::fetch_full_image(item, wallpaper_settings_from_config()).await?;
+pub async fn fetch_full_image(app: AppHandle, item: WallpaperItem) -> Result<String, String> {
+    let settings = inject_cache_root(&app, wallpaper_settings_from_config());
+    let (bytes, mime) = wallpaper::fetch_full_image(item, settings).await?;
     Ok(wallpaper::full_image_data_url(&bytes, &mime))
 }
 
@@ -358,14 +417,16 @@ pub fn run() {
             app.listen("frontend-log", move |event| {
                 crate::logging::log_frontend_event(event.payload());
             });
-            let cache_dir = app
+            let cache_root = app
                 .path()
                 .app_cache_dir()
                 .map_err(|e| format!("cannot resolve app cache dir: {e}"))?
-                .join("wallpapers")
-                .join("thumbs");
+                .join("wallpapers");
+            let cache_dir = cache_root.join("thumbs");
             fs::create_dir_all(&cache_dir)
                 .map_err(|e| format!("cannot create thumb cache dir: {e}"))?;
+            fs::create_dir_all(cache_root.join("full"))
+                .map_err(|e| format!("cannot create full cache dir: {e}"))?;
             app.manage(ThumbState::new(cache_dir));
             app.manage(crate::fonts::FontCache::default());
             Ok(())
@@ -430,6 +491,9 @@ pub fn run() {
             search_wallpapers,
             download_wallpaper,
             fetch_full_image,
+            has_wallpaper_full_cache,
+            get_wallpaper_cache_stats,
+            clear_wallpaper_cache,
             list_local_wallpapers,
             wallpaper_thumb,
             read_local_wallpaper_file,

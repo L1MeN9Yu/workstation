@@ -4,7 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import WallpaperTool from "./wallpaper";
 import {
   applyWallpaper,
+  clearWallpaperCache,
   downloadWallpaper,
+  getWallpaperCacheStats,
+  hasWallpaperFullCache,
   listLocalWallpapers,
   loadWallpaperSettings,
   previewWallpaper,
@@ -66,6 +69,14 @@ vi.mock("../../lib/wallpaper", () => ({
   formatModifiedTime: (ms: number) => `t${ms}`,
   loadWallpaperSettings: vi.fn(),
   previewWallpaper: vi.fn(),
+  hasWallpaperFullCache: vi.fn().mockResolvedValue(false),
+  getWallpaperCacheStats: vi.fn().mockResolvedValue({
+    totalBytes: 1000,
+    thumbBytes: 300,
+    fullBytes: 700,
+    limitBytes: 50 * 1024 * 1024 * 1024,
+  }),
+  clearWallpaperCache: vi.fn().mockResolvedValue(undefined),
   saveWallpaperProxy: vi.fn().mockResolvedValue(undefined),
   saveWallpaperSources: vi.fn().mockResolvedValue(undefined),
   searchWallpapers: vi.fn(),
@@ -120,6 +131,7 @@ describe("WallpaperTool", () => {
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
       sources: {
         wallhaven: {
           apiKey: "",
@@ -157,6 +169,7 @@ describe("WallpaperTool", () => {
       },
     });
     vi.mocked(searchWallpapers).mockResolvedValue([]);
+    vi.mocked(hasWallpaperFullCache).mockResolvedValue(false);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = setup(container);
@@ -593,6 +606,7 @@ describe("WallpaperTool", () => {
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "work.json",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
       sources: {
         wallhaven: {
           apiKey: "",
@@ -671,6 +685,7 @@ describe("WallpaperTool", () => {
       downloadDir: "",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
       sources: {
         wallhaven: {
           apiKey: "",
@@ -942,6 +957,97 @@ describe("WallpaperTool", () => {
     );
   });
 
+  it("settings panel shows cache stats and saves adjusted cache limit", async () => {
+    await flush();
+    const settingsBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "设置")!;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    await flush();
+    expect(container.textContent).toContain("壁纸缓存");
+    // beforeEach 默认 mock：total=1000, thumb=300, full=700, limit=50GB
+    expect(container.textContent).toContain("已用 1000B / 上限 53687091200B");
+    expect(container.textContent).toContain("缩略图 300B");
+    expect(container.textContent).toContain("原图 700B");
+    const label = Array.from(container.querySelectorAll("label")).find((l) =>
+      l.textContent?.includes("缓存容量上限"),
+    )!;
+    const input = label.querySelector("input")! as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, "80");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const saveBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "保存设置",
+    )!;
+    await act(async () => {
+      saveBtn.click();
+    });
+    expect(saveWallpaperProxy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cacheLimitBytes: 80 * 1024 * 1024 * 1024,
+      }),
+    );
+  });
+
+  it("clear cache requires confirmation and clears on confirm", async () => {
+    await flush();
+    const settingsBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "设置")!;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    await flush();
+    const clearBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "清空缓存",
+    )!;
+    await act(async () => {
+      clearBtn.click();
+    });
+    expect(container.textContent).toContain("不影响已下载壁纸");
+    expect(clearWallpaperCache).not.toHaveBeenCalled();
+    const confirmBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "确认清空",
+    )!;
+    await act(async () => {
+      confirmBtn.click();
+    });
+    await flush();
+    expect(clearWallpaperCache).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith("缓存已清空");
+    expect(getWallpaperCacheStats).toHaveBeenCalled();
+  });
+
+  it("clear cache can be cancelled without clearing", async () => {
+    await flush();
+    const settingsBtn = Array.from(
+      container.querySelectorAll("button"),
+    ).find((b) => b.textContent === "设置")!;
+    await act(async () => {
+      settingsBtn.click();
+    });
+    const clearBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "清空缓存",
+    )!;
+    await act(async () => {
+      clearBtn.click();
+    });
+    const cancelBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "取消",
+    )!;
+    await act(async () => {
+      cancelBtn.click();
+    });
+    expect(clearWallpaperCache).not.toHaveBeenCalled();
+  });
+
   it("exposes the selected source settings outside the settings panel", async () => {
     await flush();
     expect(container.textContent).toContain("wallhaven 参数");
@@ -1086,6 +1192,7 @@ describe("WallpaperTool", () => {
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
       sources: {
         wallhaven: {
           apiKey: "",
@@ -1141,6 +1248,7 @@ describe("WallpaperTool", () => {
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
       sources: {
         wallhaven: {
           apiKey: "",
@@ -1211,6 +1319,7 @@ describe("WallpaperTool", () => {
       downloadDir: "",
       defaultApplyTarget: "cmux",
       iterm2Profile: "",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
       sources: {
         wallhaven: {
           apiKey: "",
@@ -1345,23 +1454,6 @@ describe("WallpaperTool", () => {
       ) as HTMLElement;
     }
 
-    /** 搜索得到 PREVIEW_ITEM 并点击卡片打开预览 */
-    async function openLightbox(): Promise<HTMLElement> {
-      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
-      await flush();
-      const searchBtn = Array.from(container.querySelectorAll("button")).find(
-        (b) => b.textContent === "搜索",
-      )!;
-      await act(async () => {
-        searchBtn.click();
-      });
-      await act(async () => {
-        getCard().click();
-      });
-      await flush();
-      return container.querySelector('[role="dialog"]') as HTMLElement;
-    }
-
     /** 在对话框内按标题找按钮 */
     function dialogButton(
       dialog: HTMLElement,
@@ -1382,7 +1474,36 @@ describe("WallpaperTool", () => {
       ) as HTMLButtonElement;
     }
 
-    /** 搜索多张结果并点击第 index 张卡片打开预览 */
+    /** 若对话框显示「查看原图」按钮则点击以加载原图 */
+    async function viewFull(dialog: HTMLElement): Promise<void> {
+      const btn = dialogTextButton(dialog, "查看原图");
+      if (!btn) return;
+      await act(async () => {
+        btn.click();
+      });
+      await flush();
+    }
+
+    /** 搜索得到 PREVIEW_ITEM 并点击卡片打开预览，随后加载原图 */
+    async function openLightbox(): Promise<HTMLElement> {
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      await viewFull(dialog);
+      return dialog;
+    }
+
+    /** 搜索多张结果并点击第 index 张卡片打开预览，随后加载原图 */
     async function openLightboxAt(
       results: WallpaperItem[],
       index: number,
@@ -1402,7 +1523,9 @@ describe("WallpaperTool", () => {
         (cards[index] as HTMLElement).click();
       });
       await flush();
-      return container.querySelector('[role="dialog"]') as HTMLElement;
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      await viewFull(dialog);
+      return dialog;
     }
 
     /** 对话框内的位置指示文本（如 1 / 2） */
@@ -1468,7 +1591,7 @@ describe("WallpaperTool", () => {
         .mockRejectedValueOnce(new Error("proxy timeout"))
         .mockResolvedValueOnce("data:image/jpeg;base64,RETRY");
       const dialog = await openLightbox();
-      expect(dialog.textContent).toContain("预览加载失败");
+      expect(dialog.textContent).toContain("原图加载失败");
       expect(dialog.textContent).toContain("proxy timeout");
       const retryBtn = Array.from(dialog.querySelectorAll("button")).find(
         (b) => b.textContent === "重试",
@@ -1479,7 +1602,7 @@ describe("WallpaperTool", () => {
       await flush();
       const img = dialog.querySelector("img")!;
       expect(img.getAttribute("src")).toBe("data:image/jpeg;base64,RETRY");
-      expect(dialog.textContent).not.toContain("预览加载失败");
+      expect(dialog.textContent).not.toContain("原图加载失败");
     });
 
     it("按 Esc 关闭预览并复位状态", async () => {
@@ -1487,7 +1610,7 @@ describe("WallpaperTool", () => {
         .mockRejectedValueOnce(new Error("boom"))
         .mockResolvedValueOnce("data:image/jpeg;base64,OK");
       const dialog = await openLightbox();
-      expect(dialog.textContent).toContain("预览加载失败");
+      expect(dialog.textContent).toContain("原图加载失败");
       await act(async () => {
         window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
       });
@@ -1497,8 +1620,13 @@ describe("WallpaperTool", () => {
         card.click();
       });
       await flush();
-      const dialog2 = container.querySelector('[role="dialog"]')!;
-      expect(dialog2.textContent).not.toContain("预览加载失败");
+      const dialog2 = container.querySelector('[role="dialog"]')! as HTMLElement;
+      // 重新打开默认展示缩略图，不触发原图加载
+      expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
+        `thumb://${PREVIEW_ITEM.thumb_hash}`,
+      );
+      expect(dialog2.textContent).not.toContain("原图加载失败");
+      await viewFull(dialog2);
       expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
         "data:image/jpeg;base64,OK",
       );
@@ -1655,7 +1783,7 @@ describe("WallpaperTool", () => {
     it("关闭后重新打开时预览状态复位", async () => {
       vi.mocked(previewWallpaper).mockRejectedValue(new Error("old error"));
       const dialog = await openLightbox();
-      expect(dialog.textContent).toContain("预览加载失败");
+      expect(dialog.textContent).toContain("原图加载失败");
       await act(async () => {
         dialogButton(dialog, "关闭预览").click();
       });
@@ -1664,8 +1792,9 @@ describe("WallpaperTool", () => {
         getCard().click();
       });
       await flush();
-      const dialog2 = container.querySelector('[role="dialog"]')!;
-      expect(dialog2.textContent).not.toContain("预览加载失败");
+      const dialog2 = container.querySelector('[role="dialog"]')! as HTMLElement;
+      expect(dialog2.textContent).not.toContain("原图加载失败");
+      await viewFull(dialog2);
       expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
         "data:image/jpeg;base64,NEW",
       );
@@ -1692,6 +1821,8 @@ describe("WallpaperTool", () => {
       expect(positionText(dialog)).toBe("2 / 2");
       expect(dialogButton(dialog, "下一张").disabled).toBe(true);
       expect(dialogButton(dialog, "上一张").disabled).toBe(false);
+      // 切换后默认展示缩略图，点击查看原图后加载新图
+      await viewFull(dialog);
       expect(previewWallpaper).toHaveBeenLastCalledWith(
         expect.objectContaining({ id: "wallhaven-second" }),
       );
@@ -1737,6 +1868,7 @@ describe("WallpaperTool", () => {
         dialogButton(dialog, "下一张").click();
       });
       await flush();
+      await viewFull(dialog);
       const img2 = dialog.querySelector("img")!;
       expect(img2.style.transform).toContain("translate3d(0px, 0px, 0) scale(1)");
       expect(dialog.textContent).toContain("100%");
@@ -1752,7 +1884,9 @@ describe("WallpaperTool", () => {
         dialogButton(dialog, "下一张").click();
       });
       await flush();
-      expect(dialog.textContent).toContain("预览加载失败");
+      // 切换后点击查看原图触发加载失败
+      await viewFull(dialog);
+      expect(dialog.textContent).toContain("原图加载失败");
       expect(dialog.textContent).toContain("network down");
       const retryBtn = Array.from(dialog.querySelectorAll("button")).find(
         (b) => b.textContent === "重试",
@@ -1780,6 +1914,138 @@ describe("WallpaperTool", () => {
       expect(bar.className).toContain("flex-wrap");
       expect(bar.className).toContain("justify-center");
       expect(bar.className).toContain("gap-y-1");
+    });
+
+    it("打开预览默认展示缩略图，不自动下载原图", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      expect(previewWallpaper).not.toHaveBeenCalled();
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        `thumb://${PREVIEW_ITEM.thumb_hash}`,
+      );
+      expect(dialogTextButton(dialog, "查看原图")).toBeDefined();
+    });
+
+    it("原图已缓存时打开预览直接展示原图，零网络", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,CACHED");
+      vi.mocked(hasWallpaperFullCache).mockResolvedValue(true);
+      const dialog = await openLightbox();
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,CACHED",
+      );
+      expect(dialogTextButton(dialog, "查看原图")).toBeUndefined();
+    });
+
+    it("点击查看原图加载成功并隐藏按钮", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,FULL");
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        `thumb://${PREVIEW_ITEM.thumb_hash}`,
+      );
+      await act(async () => {
+        dialogTextButton(dialog, "查看原图").click();
+      });
+      await flush();
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,FULL",
+      );
+      expect(dialogTextButton(dialog, "查看原图")).toBeUndefined();
+    });
+
+    it("查看原图失败自动回退缩略图并可重试", async () => {
+      vi.mocked(previewWallpaper)
+        .mockRejectedValueOnce(new Error("proxy timeout"))
+        .mockResolvedValueOnce("data:image/jpeg;base64,RETRY");
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      await act(async () => {
+        dialogTextButton(dialog, "查看原图").click();
+      });
+      await flush();
+      expect(dialog.textContent).toContain("原图加载失败");
+      // 失败后仍展示缩略图
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        `thumb://${PREVIEW_ITEM.thumb_hash}`,
+      );
+      const retryBtn = Array.from(dialog.querySelectorAll("button")).find(
+        (b) => b.textContent === "重试",
+      )!;
+      await act(async () => {
+        retryBtn.click();
+      });
+      await flush();
+      expect(dialog.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,RETRY",
+      );
+    });
+
+    it("缩略图预览下图片铺满舞台，且支持放大与复位", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      // 未加载原图：展示缩略图且图片铺满舞台（object-contain 保持比例）
+      expect(previewWallpaper).not.toHaveBeenCalled();
+      const img = dialog.querySelector("img")!;
+      expect(img.getAttribute("src")).toBe(
+        `thumb://${PREVIEW_ITEM.thumb_hash}`,
+      );
+      expect(img.className).toContain("h-[85vh]");
+      expect(img.className).toContain("object-contain");
+      // 缩略图下可缩放：放大按钮生效
+      await act(async () => {
+        dialogButton(dialog, "放大").click();
+      });
+      expect(img.style.transform).toContain("scale(1.2)");
+      await act(async () => {
+        dialogButton(dialog, "复位到 100%").click();
+      });
+      expect(img.style.transform).toContain("translate3d(0px, 0px, 0) scale(1)");
     });
   });
 

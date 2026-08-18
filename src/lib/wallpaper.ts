@@ -123,6 +123,8 @@ export interface WallpaperSettings {
   defaultApplyTarget: ApplyWallpaperTarget;
   /** iTerm2 目标 Dynamic Profile 名称（应用目标为 iterm2 时使用） */
   iterm2Profile: string;
+  /** 壁纸缓存容量上限（字节），空表示使用默认 50GB */
+  cacheLimitBytes: number;
   sources: Record<string, SourceSettings>;
 }
 
@@ -130,8 +132,23 @@ export interface WallpaperSettingsInput {
   downloadDir: string;
   defaultApplyTarget?: ApplyWallpaperTarget;
   iterm2Profile?: string;
+  cacheLimitBytes?: number;
   sources?: Record<string, Partial<SourceSettings>>;
 }
+
+/** 缓存池占用统计（后端 camelCase 返回） */
+export interface WallpaperCacheStats {
+  totalBytes: number;
+  thumbBytes: number;
+  fullBytes: number;
+  limitBytes: number;
+}
+
+/** 默认缓存容量上限：50GB（字节） */
+export const DEFAULT_CACHE_LIMIT_BYTES = 50 * 1024 * 1024 * 1024;
+/** 缓存容量可配置范围：1GB – 200GB */
+export const MIN_CACHE_LIMIT_BYTES = 1 * 1024 * 1024 * 1024;
+export const MAX_CACHE_LIMIT_BYTES = 200 * 1024 * 1024 * 1024;
 
 export interface BitGroup {
   /** 选项标识，与 wallhaven API 位标记位置一一对应 */
@@ -216,6 +233,7 @@ export const DEFAULT_WALLPAPER_SETTINGS: WallpaperSettings = {
   downloadDir: "",
   defaultApplyTarget: "cmux",
   iterm2Profile: "",
+  cacheLimitBytes: DEFAULT_CACHE_LIMIT_BYTES,
   sources: {
     wallhaven: { ...DEFAULT_SOURCE_SETTINGS },
     danbooru: {
@@ -246,9 +264,24 @@ export function downloadWallpaper(item: WallpaperItem): Promise<string> {
   return invoke<string>("download_wallpaper", { item });
 }
 
-/** 拉取壁纸原图并返回 data URL（供查看器预览） */
+/** 拉取壁纸原图并返回 data URL（供查看器预览；后端负责缓存命中） */
 export function previewWallpaper(item: WallpaperItem): Promise<string> {
   return invoke<string>("fetch_full_image", { item });
+}
+
+/** 判断某张壁纸的原图是否已在磁盘缓存（预览打开时据此决定直接展示原图） */
+export function hasWallpaperFullCache(item: WallpaperItem): Promise<boolean> {
+  return invoke<boolean>("has_wallpaper_full_cache", { item });
+}
+
+/** 读取缓存池占用统计（总计 + 缩略图/原图明细 + 上限） */
+export function getWallpaperCacheStats(): Promise<WallpaperCacheStats> {
+  return invoke<WallpaperCacheStats>("get_wallpaper_cache_stats");
+}
+
+/** 清空缓存池（仅缓存文件，不影响本地壁纸库） */
+export function clearWallpaperCache(): Promise<void> {
+  return invoke<void>("clear_wallpaper_cache");
 }
 
 export function thumbUrl(hash: string): string {
@@ -297,15 +330,17 @@ export async function loadWallpaperSettings(): Promise<WallpaperSettings> {
       DEFAULT_WALLPAPER_SETTINGS.defaultApplyTarget,
     iterm2Profile:
       stored?.iterm2Profile ?? DEFAULT_WALLPAPER_SETTINGS.iterm2Profile,
+    cacheLimitBytes:
+      stored?.cacheLimitBytes ?? DEFAULT_WALLPAPER_SETTINGS.cacheLimitBytes,
     sources,
   };
 }
 
-/** 保存代理/下载目录/应用目标（全局网络配置，手动保存） */
+/** 保存代理/下载目录/应用目标/缓存容量（全局网络配置，手动保存） */
 export async function saveWallpaperProxy(
   settings: Pick<
     WallpaperSettings,
-    "downloadDir" | "defaultApplyTarget" | "iterm2Profile"
+    "downloadDir" | "defaultApplyTarget" | "iterm2Profile" | "cacheLimitBytes"
   >,
 ): Promise<void> {
   await writeConfig(SETTINGS_KEY, settings);
