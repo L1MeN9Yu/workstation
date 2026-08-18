@@ -19,8 +19,12 @@ import {
   RATIO_OPTIONS,
   applyWallpaper,
   bitsToSelections,
+  clearWallpaperCache,
   downloadWallpaper,
+  formatFileSize,
   generateSeed,
+  getWallpaperCacheStats,
+  hasWallpaperFullCache,
   loadWallpaperSettings,
   previewWallpaper,
   saveWallpaperProxy,
@@ -30,6 +34,7 @@ import {
   thumbUrl,
   type ApplyWallpaperTarget,
   type SourceSettings,
+  type WallpaperCacheStats,
   type WallpaperItem,
   type WallpaperSettings,
 } from "../../lib/wallpaper";
@@ -284,6 +289,12 @@ export default function WallpaperTool() {
   const [errors, setErrors] = useState<SearchError[]>([]);
   const [settings, setSettings] = useState<WallpaperSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  /** 缓存池占用统计（设置面板展示） */
+  const [cacheStats, setCacheStats] = useState<WallpaperCacheStats | null>(null);
+  /** 清空缓存的二次确认弹窗状态 */
+  const [confirmClearCache, setConfirmClearCache] = useState(false);
+  /** 清空缓存进行中 */
+  const [clearingCache, setClearingCache] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
   /** 本次应用目标（单次切换，不持久化） */
   const [applyTarget, setApplyTarget] = useState<ApplyWallpaperTarget>("cmux");
@@ -299,9 +310,14 @@ export default function WallpaperTool() {
   // ---- Lightbox 预览状态 ----
   /** 当前预览的壁纸在搜索列表 `items` 中的索引；null 表示未打开 */
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  /** 当前展示的图片 data URL（原图）；缩略图阶段为 null */
   const [dataUrl, setDataUrl] = useState<string | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  /** 是否已切换为原图展示（未切换时展示缩略图） */
+  const [showFull, setShowFull] = useState(false);
+  /** 原图加载中 */
+  const [fullLoading, setFullLoading] = useState(false);
+  /** 原图加载失败信息（自动回退缩略图后可重试） */
+  const [fullError, setFullError] = useState<string | null>(null);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
@@ -329,11 +345,35 @@ export default function WallpaperTool() {
     previewReqRef.current += 1;
     setPreviewIndex(null);
     setDataUrl(null);
-    setPreviewError(null);
-    setPreviewLoading(false);
+    setShowFull(false);
+    setFullLoading(false);
+    setFullError(null);
     setScale(1);
     setOffset({ x: 0, y: 0 });
     setDragging(false);
+  }, []);
+
+  /** 加载并展示当前预览壁纸的原图（供「查看原图」按钮与缓存命中路径调用） */
+  const loadFullImage = useCallback(async (item: WallpaperItem): Promise<void> => {
+    const reqId = previewReqRef.current + 1;
+    previewReqRef.current = reqId;
+    setFullLoading(true);
+    setFullError(null);
+    try {
+      const url = await previewWallpaper(item);
+      if (previewReqRef.current !== reqId) return;
+      setDataUrl(url);
+      setShowFull(true);
+    } catch (e) {
+      if (previewReqRef.current !== reqId) return;
+      // 失败自动退回缩略图，可重试
+      setShowFull(false);
+      setFullError(String(e));
+    } finally {
+      if (previewReqRef.current === reqId) {
+        setFullLoading(false);
+      }
+    }
   }, []);
 
   const openPreview = useCallback(
@@ -343,24 +383,23 @@ export default function WallpaperTool() {
       previewReqRef.current = reqId;
       setPreviewIndex(index);
       setDataUrl(null);
-      setPreviewError(null);
-      setPreviewLoading(true);
+      setShowFull(false);
+      setFullLoading(false);
+      setFullError(null);
       setScale(1);
       setOffset({ x: 0, y: 0 });
+      // 原图已在缓存时直接展示原图（零网络），否则保持缩略图
       try {
-        const url = await previewWallpaper(item);
+        const cached = await hasWallpaperFullCache(item);
         if (previewReqRef.current !== reqId) return;
-        setDataUrl(url);
-      } catch (e) {
-        if (previewReqRef.current !== reqId) return;
-        setPreviewError(String(e));
-      } finally {
-        if (previewReqRef.current === reqId) {
-          setPreviewLoading(false);
+        if (cached) {
+          void loadFullImage(item);
         }
+      } catch {
+        // 缓存查询失败时保持缩略图，不阻塞浏览
       }
     },
-    [items],
+    [items, loadFullImage],
   );
 
   const goPrev = useCallback((): void => {
@@ -374,8 +413,8 @@ export default function WallpaperTool() {
   }, [previewIndex, items.length, openPreview]);
 
   function handleRetryPreview(): void {
-    if (previewIndex !== null) {
-      void openPreview(previewIndex);
+    if (previewItem !== null) {
+      void loadFullImage(previewItem);
     }
   }
 
@@ -659,12 +698,47 @@ export default function WallpaperTool() {
     }
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    void getWallpaperCacheStats()
+      .then((stats) => {
+        if (!cancelled) {
+          setCacheStats(stats);
+        }
+      })
+      .catch(() => {
+        // 非 Tauri 环境（测试）时忽略，占用展示保持空态
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleClearCache(): Promise<void> {
+    setClearingCache(true);
+    try {
+      await clearWallpaperCache();
+      toast.success("缓存已清空");
+      setCacheStats(await getWallpaperCacheStats());
+    } catch (e) {
+      toast.error(`清空缓存失败：${String(e)}`);
+    } finally {
+      setClearingCache(false);
+      setConfirmClearCache(false);
+    }
+  }
+
   async function handleSaveSettings() {
     if (!settings) return;
     try {
       await saveWallpaperProxy(settings);
       toast.success("设置已保存");
       setShowSettings(false);
+      try {
+        setCacheStats(await getWallpaperCacheStats());
+      } catch {
+        // 占用刷新失败不影响保存结果提示
+      }
     } catch (e) {
       toast.error(`保存设置失败：${String(e)}`);
     }
@@ -833,6 +907,64 @@ export default function WallpaperTool() {
               ))}
             </select>
           </label>
+          <div className="border-t border-gray-200 pt-3 text-sm font-medium dark:border-gray-700">
+            壁纸缓存
+          </div>
+          <label className="block text-sm">
+            缓存容量上限（GB，范围 1–200，默认 50）
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={Math.round(settings.cacheLimitBytes / (1024 * 1024 * 1024))}
+              onChange={(e) => {
+                const gb = Number(e.target.value);
+                setSettings({
+                  ...settings,
+                  cacheLimitBytes: Number.isFinite(gb)
+                    ? Math.round(gb) * 1024 * 1024 * 1024
+                    : settings.cacheLimitBytes,
+                });
+              }}
+              className={inputClass}
+            />
+          </label>
+          {cacheStats && (
+            <div className="text-xs text-gray-500 dark:text-gray-400">
+              已用 {formatFileSize(cacheStats.totalBytes)} / 上限{" "}
+              {formatFileSize(cacheStats.limitBytes)}
+              <span className="mx-1">·</span>
+              缩略图 {formatFileSize(cacheStats.thumbBytes)}
+              <span className="mx-1">·</span>
+              原图 {formatFileSize(cacheStats.fullBytes)}
+            </div>
+          )}
+          {confirmClearCache ? (
+            <div className="flex items-center gap-2 text-xs">
+              <span>确认清空缓存？仅删除缓存文件，不影响已下载壁纸。</span>
+              <button
+                onClick={() => void handleClearCache()}
+                disabled={clearingCache}
+                className="rounded-md bg-red-600 px-2 py-1 text-white disabled:opacity-50"
+              >
+                {clearingCache ? "清空中..." : "确认清空"}
+              </button>
+              <button
+                onClick={() => setConfirmClearCache(false)}
+                disabled={clearingCache}
+                className="rounded-md bg-gray-300 px-2 py-1 dark:bg-gray-600"
+              >
+                取消
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmClearCache(true)}
+              className="rounded-md bg-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+            >
+              清空缓存
+            </button>
+          )}
           <button
             onClick={() => void handleSaveSettings()}
             className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white"
@@ -1181,29 +1313,39 @@ export default function WallpaperTool() {
             className="pointer-events-none absolute inset-0 flex items-center justify-center"
             onClick={(e) => e.stopPropagation()}
           >
-            {previewLoading && (
+            {fullLoading && (
               <div
                 className="pointer-events-auto flex animate-pulse items-center gap-2 text-gray-300"
                 role="status"
               >
-                加载中...
+                原图加载中...
               </div>
             )}
-            {previewError && !previewLoading && (
+            {fullError && !fullLoading && (
               <div
-                className="pointer-events-auto flex flex-col items-center gap-3 text-gray-200"
+                className="pointer-events-auto absolute top-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-md bg-gray-900/80 px-3 py-2 text-sm text-gray-200"
                 role="alert"
               >
-                <span>预览加载失败：{previewError}</span>
+                <span>原图加载失败：{fullError}</span>
                 <button
                   onClick={() => void handleRetryPreview()}
-                  className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white hover:bg-accent-500"
+                  className="rounded-md bg-accent-600 px-3 py-1 text-xs text-white hover:bg-accent-500"
                 >
                   重试
                 </button>
               </div>
             )}
-            {dataUrl && !previewLoading && (
+            {!showFull && !fullLoading && (
+              <img
+                src={thumbUrl(previewItem.thumb_hash)}
+                alt={previewItem.id}
+                className="pointer-events-auto max-h-[85vh] max-w-[90vw] select-none"
+                style={{
+                  transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})`,
+                }}
+              />
+            )}
+            {showFull && dataUrl && !fullLoading && (
               <img
                 ref={imgRef}
                 src={dataUrl}
@@ -1257,6 +1399,15 @@ export default function WallpaperTool() {
               {getSourceMeta(previewItem.source)?.label ?? previewItem.source}
             </span>
             <WallpaperTargetSelect value={applyTarget} onChange={setApplyTarget} dark />
+            {!showFull && (
+              <button
+                onClick={() => void loadFullImage(previewItem)}
+                disabled={fullLoading}
+                className="rounded-md bg-gray-600 px-2 py-1 text-white hover:bg-gray-500 disabled:opacity-50"
+              >
+                {fullLoading ? "原图加载中..." : "查看原图"}
+              </button>
+            )}
             <button
               onClick={() => void handleApply(previewItem)}
               disabled={applyingId === previewItem.id}

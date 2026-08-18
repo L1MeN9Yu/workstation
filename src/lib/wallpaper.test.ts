@@ -2,19 +2,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   BIT_GROUPS,
+  DEFAULT_CACHE_LIMIT_BYTES,
   DEFAULT_SOURCE_SETTINGS,
   DEFAULT_WALLPAPER_SETTINGS,
+  MAX_CACHE_LIMIT_BYTES,
+  MIN_CACHE_LIMIT_BYTES,
   RATIO_OPTIONS,
   applyWallpaper,
   applyWallpaperToGhosty,
   applyWallpaperToIt,
   bitsToSelections,
+  clearWallpaperCache,
   deleteLocalWallpapers,
   downloadWallpaper,
   fetchWallpaperThumb,
   formatFileSize,
   formatModifiedTime,
   generateSeed,
+  getWallpaperCacheStats,
+  hasWallpaperFullCache,
   listLocalWallpapers,
   loadWallpaperSettings,
   previewWallpaper,
@@ -102,6 +108,7 @@ describe("wallpaper", () => {
       downloadDir: "",
       defaultApplyTarget: "cmux" as const,
       iterm2Profile: "",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
       sources: {
         wallhaven: {
           apiKey: "",
@@ -172,6 +179,53 @@ describe("wallpaper", () => {
     await expect(previewWallpaper(item)).rejects.toThrow("fetch failed");
   });
 
+  it("hasWallpaperFullCache invokes with the item payload", async () => {
+    mockedInvoke.mockResolvedValue(true);
+    const item: WallpaperItem = {
+      id: "wallhaven-cached",
+      source: "wallhaven",
+      thumb_url: "https://thumb",
+      thumb_hash: "aaaaaaaaaaaaaaaa",
+      full_url: "https://full",
+      width: 1920,
+      height: 1080,
+    };
+    const hit = await hasWallpaperFullCache(item);
+    expect(mockedInvoke).toHaveBeenCalledWith("has_wallpaper_full_cache", {
+      item,
+    });
+    expect(hit).toBe(true);
+  });
+
+  it("getWallpaperCacheStats returns parsed stats", async () => {
+    mockedInvoke.mockResolvedValue({
+      totalBytes: 1000,
+      thumbBytes: 300,
+      fullBytes: 700,
+      limitBytes: DEFAULT_CACHE_LIMIT_BYTES,
+    });
+    const stats = await getWallpaperCacheStats();
+    expect(mockedInvoke).toHaveBeenCalledWith("get_wallpaper_cache_stats");
+    expect(stats).toEqual({
+      totalBytes: 1000,
+      thumbBytes: 300,
+      fullBytes: 700,
+      limitBytes: DEFAULT_CACHE_LIMIT_BYTES,
+    });
+  });
+
+  it("clearWallpaperCache invokes the clear command", async () => {
+    mockedInvoke.mockResolvedValue(undefined);
+    await clearWallpaperCache();
+    expect(mockedInvoke).toHaveBeenCalledWith("clear_wallpaper_cache");
+  });
+
+  it("cache limit constants follow 1GB-200GB window", () => {
+    expect(DEFAULT_CACHE_LIMIT_BYTES).toBe(50 * 1024 * 1024 * 1024);
+    expect(MIN_CACHE_LIMIT_BYTES).toBe(1024 * 1024 * 1024);
+    expect(MAX_CACHE_LIMIT_BYTES).toBe(200 * 1024 * 1024 * 1024);
+  });
+
   it("loadWallpaperSettings merges stored values over defaults", async () => {
     mockedInvoke.mockResolvedValue(null);
     vi.mocked(readConfig).mockImplementation(async (key: string) => {
@@ -180,6 +234,7 @@ describe("wallpaper", () => {
           downloadDir: "/custom",
           defaultApplyTarget: "iterm2",
           iterm2Profile: "work.json",
+          cacheLimitBytes: 10 * 1024 * 1024 * 1024,
         };
       }
       return null;
@@ -190,7 +245,15 @@ describe("wallpaper", () => {
     expect(settings.downloadDir).toBe("/custom");
     expect(settings.defaultApplyTarget).toBe("iterm2");
     expect(settings.iterm2Profile).toBe("work.json");
+    expect(settings.cacheLimitBytes).toBe(10 * 1024 * 1024 * 1024);
     expect(settings.sources.wallhaven).toEqual(DEFAULT_SOURCE_SETTINGS);
+  });
+
+  it("loadWallpaperSettings defaults cache limit when not stored", async () => {
+    mockedInvoke.mockResolvedValue(null);
+    vi.mocked(readConfig).mockResolvedValue(null);
+    const settings = await loadWallpaperSettings();
+    expect(settings.cacheLimitBytes).toBe(DEFAULT_CACHE_LIMIT_BYTES);
   });
 
   it("loadWallpaperSettings defaults apply target when not stored", async () => {
@@ -287,11 +350,13 @@ describe("wallpaper", () => {
       downloadDir: "/d",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",
+      cacheLimitBytes: 20 * 1024 * 1024 * 1024,
     });
     expect(writeConfig).toHaveBeenCalledWith("wallpaper", {
       downloadDir: "/d",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",
+      cacheLimitBytes: 20 * 1024 * 1024 * 1024,
     });
   });
 
@@ -579,6 +644,7 @@ describe("wallpaper", () => {
         downloadDir: "/w",
         defaultApplyTarget: "cmux",
         iterm2Profile: "",
+  cacheLimitBytes: 50 * 1024 * 1024 * 1024,
         sources: {},
       };
       const items = await listLocalWallpapers(settings);

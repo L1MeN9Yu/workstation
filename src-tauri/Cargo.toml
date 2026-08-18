@@ -35,7 +35,7 @@ base64 = "0.22"
 fontdb = "0.24.0"
 image = "0.25"
 tauri-plugin-dialog = "2"
+filetime = "0.2.29"
 
 [dev-dependencies]
-filetime = "0.2.29"
 

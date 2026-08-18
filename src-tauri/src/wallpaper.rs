@@ -13,7 +13,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 const USER_AGENT: &str = "workstation-wallpaper/0.1";
 const DEFAULT_MIN_WIDTH: u32 = 1920;
 const CACHE_META_FILE: &str = "cache_meta.json";
-const MAX_CACHE_BYTES: u64 = 20_000_000_000; // 20GB（十进制）
+/// 缓存容量默认上限：50GB（十进制字节）。范围 1GB–200GB，可在设置中调整。
+pub const DEFAULT_CACHE_LIMIT_BYTES: u64 = 50_000_000_000;
+const MIN_CACHE_LIMIT_BYTES: u64 = 1_000_000_000;
+const MAX_CACHE_LIMIT_BYTES: u64 = 200_000_000_000;
+/// 缓存池子目录：缩略图缓存目录（ThumbState.dir 的管理根）。
+pub const THUMBS_SUBDIR: &str = "thumbs";
+/// 缓存池子目录：原图缓存目录。
+pub const FULL_SUBDIR: &str = "full";
 
 fn de_u32_string<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where
@@ -82,6 +89,11 @@ pub struct WallpaperSettings {
     pub proxy: Option<String>,
     pub download_dir: Option<String>,
     pub sources: HashMap<String, SourceSettings>,
+    /// 缓存容量上限（字节）；空时使用默认 50GB。
+    pub cache_limit_bytes: Option<u64>,
+    /// 缓存池根目录（运行时由命令注入，不持久化）。
+    #[serde(skip)]
+    pub cache_root: Option<String>,
     #[serde(skip)]
     pub base_urls: HashMap<String, String>,
 }
@@ -97,6 +109,13 @@ impl WallpaperSettings {
             Some(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
             _ => None,
         };
+    }
+
+    /// 有效缓存上限（字节）：配置值超范围时收敛到 [1GB, 200GB]，未配置用默认 50GB。
+    pub fn cache_limit(&self) -> u64 {
+        self.cache_limit_bytes
+            .unwrap_or(DEFAULT_CACHE_LIMIT_BYTES)
+            .clamp(MIN_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
     }
 }
 
@@ -443,41 +462,35 @@ pub async fn download_wallpaper(
     item: WallpaperItem,
     settings: WallpaperSettings,
 ) -> Result<String, String> {
-    let client = build_client(settings.proxy.as_deref())?;
     let dir = settings
         .download_dir
+        .as_deref()
         .filter(|d| !d.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(default_download_dir);
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create download dir: {e}"))?;
 
-    let resp = client
-        .get(&item.full_url)
-        .send()
-        .await
-        .map_err(|e| format!("download request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(http_error(resp.status(), "download"));
-    }
-    let ext = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(extension_from_content_type)
-        .unwrap_or("jpg");
+    // 经 fetch_full_image 取字节：命中原图缓存时零网络请求，未命中经代理下载
+    let (bytes, mime) = fetch_full_image(item.clone(), settings).await?;
+    let ext = extension_from_content_type(&mime);
     let file_name = sanitize_file_name(&item.id);
     let path = dir.join(format!("{file_name}.{ext}"));
-
-    let stream = resp.bytes_stream().map_err(std::io::Error::other);
-    write_download_stream(&path, stream).await?;
+    fs::write(&path, &bytes).map_err(|e| format!("cannot write wallpaper file: {e}"))?;
     Ok(path.display().to_string())
 }
 
-/// 通过代理下载原图，返回原始字节与推断的 mime（content-type 缺失时回退 image/jpeg），不落盘不缓存。
+/// 经缓存/代理下载原图，返回原始字节与推断的 mime（content-type 缺失时回退 image/jpeg）。
+/// 命中原图缓存时直接返回缓存字节且不发起网络请求；未命中时经代理下载并将结果写入缓存。
 pub async fn fetch_full_image(
     item: WallpaperItem,
     settings: WallpaperSettings,
 ) -> Result<(Vec<u8>, String), String> {
+    let key = thumb_hash(&item.full_url);
+    if let Some(pool) = settings.cache_root.as_deref().map(PathBuf::from) {
+        if let Some((bytes, mime)) = full_image_cache_get(&pool, &key) {
+            return Ok((bytes, mime));
+        }
+    }
     let client = build_client(settings.proxy.as_deref())?;
     let resp = client
         .get(&item.full_url)
@@ -498,7 +511,12 @@ pub async fn fetch_full_image(
         .bytes()
         .await
         .map_err(|e| format!("full image body read failed: {e}"))?;
-    Ok((bytes.to_vec(), mime))
+    let bytes = bytes.to_vec();
+    if let Some(pool) = settings.cache_root.as_deref().map(PathBuf::from) {
+        let _ = full_image_cache_put(&pool, &key, &bytes, &mime);
+        let _ = enforce_cache_limit(&pool, settings.cache_limit());
+    }
+    Ok((bytes, mime))
 }
 
 /// 将图片字节拼装为 `data:<mime>;base64,...` 形式的 data URL。
@@ -758,6 +776,197 @@ fn cache_file_path(dir: &Path, hash: &str, ext: &str) -> PathBuf {
     dir.join(format!("{hash}.{ext}"))
 }
 
+/// 缓存池根目录由缩略图缓存目录推导：池根 = thumb 目录的父目录（`.../wallpapers`）。
+pub fn cache_pool_root(thumbs_dir: &Path) -> PathBuf {
+    thumbs_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| thumbs_dir.to_path_buf())
+}
+
+/// 缩略图缓存子目录。
+pub fn thumbs_cache_dir(pool: &Path) -> PathBuf {
+    pool.join(THUMBS_SUBDIR)
+}
+
+/// 原图缓存子目录。
+pub fn full_cache_dir(pool: &Path) -> PathBuf {
+    pool.join(FULL_SUBDIR)
+}
+
+/// 原图缓存文件路径：`pool/full/{key}.{ext}`。
+pub fn full_image_cache_path(pool: &Path, key: &str, ext: &str) -> PathBuf {
+    full_cache_dir(pool).join(format!("{key}.{ext}"))
+}
+
+/// 读取原图缓存：返回字节与 mime（按扩展名推断）；命中时刷新文件最后访问时间。
+/// 未命中返回 None。目录不可读按未命中处理，不报错。
+pub fn full_image_cache_get(pool: &Path, key: &str) -> Option<(Vec<u8>, String)> {
+    let dir = full_cache_dir(pool);
+    let prefix = format!("{key}.");
+    let file = fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })?;
+    let ext = file.extension()?.to_string_lossy().to_string();
+    let bytes = fs::read(&file).ok()?;
+    let _ = touch_file_mtime(&file);
+    Some((bytes, mime_for_ext(&ext).to_string()))
+}
+
+/// 写原图缓存：以 `<key>.<mime-ext>` 写入临时文件后原子改名，并刷新访问时间。
+pub fn full_image_cache_put(
+    pool: &Path,
+    key: &str,
+    bytes: &[u8],
+    mime: &str,
+) -> Result<(), String> {
+    let dir = full_cache_dir(pool);
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create full cache dir: {e}"))?;
+    let ext = extension_from_content_type(mime);
+    let target = full_image_cache_path(pool, key, ext);
+    let tmp = dir.join(format!(".{key}.{}.tmp", std::process::id()));
+    fs::write(&tmp, bytes).map_err(|e| format!("cannot write full cache tmp: {e}"))?;
+    fs::rename(&tmp, &target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("cannot rename full cache tmp: {e}")
+    })?;
+    let _ = touch_file_mtime(&target);
+    // 同 key 其他扩展名的旧条目随 mime 变更移除，避免残留
+    let prefix = format!("{key}.");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == target {
+            continue;
+        }
+        if path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .starts_with(&prefix)
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+/// 更新文件最后访问时间（用于文件级别 LRU 的热度刷新）；失败静默。
+fn touch_file_mtime(path: &Path) -> std::io::Result<()> {
+    let t = filetime::FileTime::now();
+    filetime::set_file_mtime(path, t)
+}
+
+/// 惰性 LRU 淘汰：扫描缓存池内 `thumbs/` 与 `full/` 全部文件，
+/// 总字节数超过 `cap_bytes` 时按最后访问时间（mtime）从旧到新删除直至达标。
+/// 返回被删除的文件路径（供调用方同步自己的索引/缓存状态）。
+pub fn enforce_cache_limit(pool: &Path, cap_bytes: u64) -> Vec<PathBuf> {
+    let mut files: Vec<(PathBuf, u64, u64)> = Vec::new();
+    let mut total: u64 = 0;
+    for sub in [THUMBS_SUBDIR, FULL_SUBDIR] {
+        let dir = pool.join(sub);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name == CACHE_META_FILE {
+                continue;
+            }
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let size = meta.len();
+            let last_access_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            total += size;
+            files.push((path, size, last_access_ms));
+        }
+    }
+    if total <= cap_bytes {
+        return Vec::new();
+    }
+    files.sort_by_key(|(_, size, ts)| {
+        let _ = size;
+        *ts
+    });
+    let mut removed = Vec::new();
+    let mut now_total = total;
+    for (path, size, _) in files {
+        if now_total <= cap_bytes {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            now_total -= size;
+            removed.push(path);
+        }
+    }
+    removed
+}
+
+/// 缓存池占用统计：`(total, thumb_bytes, full_bytes)`。
+pub fn full_image_cache_size(pool: &Path) -> (u64, u64, u64) {
+    let mut thumb = 0u64;
+    let mut full = 0u64;
+    for (sub, slot) in [(THUMBS_SUBDIR, &mut thumb), (FULL_SUBDIR, &mut full)] {
+        let dir = pool.join(sub);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.file_name().unwrap_or_default() == CACHE_META_FILE {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(&path) {
+                if meta.is_file() {
+                    *slot += meta.len();
+                }
+            }
+        }
+    }
+    (thumb + full, thumb, full)
+}
+
+/// 清空缓存池：删除 `thumbs/` 与 `full/` 下全部缓存文件（保留 cache_meta.json），
+/// 不影响本地壁纸库（下载目录）。目录不存在视为空，不报错。
+pub fn clear_wallpaper_cache(pool: &Path) -> Result<(), String> {
+    for sub in [THUMBS_SUBDIR, FULL_SUBDIR] {
+        let dir = pool.join(sub);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.file_name().unwrap_or_default() == CACHE_META_FILE {
+                continue;
+            }
+            if path.is_file() {
+                fs::remove_file(&path).map_err(|e| format!("cannot clear cache file: {e}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_thumb_index(dir: &Path) -> ThumbIndex {
     let path = dir.join(CACHE_META_FILE);
     match fs::read_to_string(&path)
@@ -817,31 +1026,6 @@ fn save_thumb_index(dir: &Path, index: &ThumbIndex) {
     }
 }
 
-fn prune_lru_locked(dir: &Path, index: &mut ThumbIndex, max_bytes: u64) {
-    let total: u64 = index.values().map(|e| e.size).sum();
-    if total <= max_bytes {
-        return;
-    }
-    let mut ordered: Vec<(String, u64)> = index
-        .iter()
-        .map(|(h, e)| (h.clone(), e.last_access_ms))
-        .collect();
-    ordered.sort_by_key(|(_, ts)| *ts);
-    for (hash, _) in ordered {
-        let remaining: u64 = index.values().map(|e| e.size).sum();
-        if remaining <= max_bytes {
-            break;
-        }
-        if let Some(entry) = index.remove(&hash) {
-            let _ = fs::remove_file(cache_file_path(dir, &hash, &entry.ext));
-        }
-    }
-}
-
-fn prune_lru(dir: &Path, index: &mut ThumbIndex) {
-    prune_lru_locked(dir, index, MAX_CACHE_BYTES);
-}
-
 fn lazy_prune_locked(dir: &Path, index: &mut ThumbIndex, active: &HashMap<String, String>) {
     let stale: Vec<String> = index
         .keys()
@@ -857,6 +1041,13 @@ fn lazy_prune_locked(dir: &Path, index: &mut ThumbIndex, active: &HashMap<String
         dir.join(CACHE_META_FILE),
         serde_json::to_string(index).unwrap_or_default(),
     );
+}
+
+/// 从缩略图缓存文件路径解析缓存 hash（`<hash>.<ext>`）；无法解析返回 None。
+fn hash_from_cache_path(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    let (hash, _ext) = name.rsplit_once('.')?;
+    Some(hash.to_string())
 }
 
 pub struct ThumbState {
@@ -888,6 +1079,7 @@ impl ThumbState {
         self.registry.read().unwrap().get(hash).cloned()
     }
 
+    /// 供协议读取：命中缓存时刷新文件 mtime（保持 LRU 热度）以配合文件级统一LRU。
     pub fn cached(&self, hash: &str) -> Option<(Vec<u8>, &'static str)> {
         let entry = self.index.read().unwrap().get(hash).cloned()?;
         let path = cache_file_path(&self.dir, hash, &entry.ext);
@@ -901,6 +1093,7 @@ impl ThumbState {
                 e.last_access_ms = now_ms();
             }
         }
+        let _ = touch_file_mtime(&path);
         Some((bytes, mime_for_ext(&entry.ext)))
     }
 
@@ -948,7 +1141,14 @@ impl ThumbState {
                     last_access_ms: now_ms(),
                 },
             );
-            prune_lru(&self.dir, &mut index);
+            // 统一池级 LRU：缩略图/原图同享缓存上限，超限按文件 mtime 淘汰最旧。
+            // 删除的缩略图文件需同步清理 index，避免索引残留。
+            let removed = enforce_cache_limit(&cache_pool_root(&self.dir), settings.cache_limit());
+            for p in &removed {
+                if let Some(removed_hash) = hash_from_cache_path(p) {
+                    index.remove(&removed_hash);
+                }
+            }
         }
         save_thumb_index(&self.dir, &self.index.read().unwrap());
         let bytes = fs::read(&path).map_err(|e| format!("cache read failed: {e}"))?;
@@ -1065,6 +1265,8 @@ mod tests {
             proxy: proxy.map(|p| p.to_string()),
             download_dir: None,
             sources: map,
+            cache_limit_bytes: None,
+            cache_root: None,
             base_urls: HashMap::new(),
         }
     }
@@ -1662,6 +1864,8 @@ mod tests {
             proxy: None,
             download_dir: None,
             sources: HashMap::new(),
+            cache_limit_bytes: None,
+            cache_root: None,
             base_urls: HashMap::new(),
         }
     }
@@ -1761,6 +1965,41 @@ mod tests {
     }
 
     #[test]
+    fn get_or_fetch_applies_pool_limit_and_syncs_index() {
+        // 模拟真实布局：pool/{thumbs,full}
+        let pool_parent = temp_cache_dir("pool-limit");
+        let dir = pool_parent.join(THUMBS_SUBDIR);
+        let full_dir = pool_parent.join(FULL_SUBDIR);
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&full_dir).unwrap();
+        // 预置一个超大（sparse）旧 full 文件，超过默认 50GB 上限后最优先淘汰
+        let old_full = full_image_cache_path(&pool_parent, "f0000000000000001", "jpg");
+        {
+            use std::io::Seek;
+            let mut f = std::fs::File::create(&old_full).unwrap();
+            f.seek(std::io::SeekFrom::Start(DEFAULT_CACHE_LIMIT_BYTES + 1))
+                .unwrap();
+            f.write_all(&[0u8; 1]).unwrap();
+        }
+        set_mtime(&old_full, 1_000);
+        let server = MockServer::new(vec![(200, "th-bytes", "image/jpeg")]);
+        let url = format!("{}/img", server.base_url());
+        let state = state_with(&dir, &url);
+        let hash = thumb_hash(&url);
+        let settings = WallpaperSettings {
+            cache_limit_bytes: Some(DEFAULT_CACHE_LIMIT_BYTES),
+            ..empty_settings()
+        };
+        tauri::async_runtime::block_on(state.get_or_fetch(&hash, &settings)).unwrap();
+        // 旧 full 文件被 pool LRU 淘汰
+        assert!(!old_full.exists(), "old full file should be evicted");
+        // 新 thumb 仍在 index 与磁盘
+        assert!(cache_file_path(&dir, &hash, "jpg").exists());
+        assert!(state.cached(&hash).is_some());
+        let _ = std::fs::remove_dir_all(&pool_parent);
+    }
+
+    #[test]
     fn cache_hit_updates_last_access_in_index() {
         let server = MockServer::new(vec![(200, "img-bytes", "image/jpeg")]);
         let dir = temp_cache_dir("touch");
@@ -1783,47 +2022,302 @@ mod tests {
     }
 
     #[test]
-    fn prune_lru_evicts_oldest_beyond_capacity() {
-        let dir = temp_cache_dir("lru");
-        let mut index = ThumbIndex::new();
+    fn enforce_cache_limit_evicts_oldest_beyond_capacity() {
+        let pool = temp_cache_dir("lru");
+        let thumbs = thumbs_cache_dir(&pool);
+        fs::create_dir_all(&thumbs).unwrap();
         for i in 0..3 {
             let hash = format!("h{i:016x}");
-            std::fs::write(cache_file_path(&dir, &hash, "jpg"), vec![0u8; 100]).unwrap();
-            index.insert(
-                hash,
-                ThumbMetaEntry {
-                    url: format!("u{i}"),
-                    size: 100,
-                    ext: "jpg".to_string(),
-                    last_access_ms: i as u64,
-                },
-            );
+            let path = cache_file_path(&thumbs, &hash, "jpg");
+            std::fs::write(&path, vec![0u8; 100]).unwrap();
+            set_mtime(&path, 1_000 + i * 1000);
         }
-        prune_lru_locked(&dir, &mut index, 250);
-        assert!(!index.contains_key("h0000000000000000"), "oldest evicted");
-        assert!(index.contains_key("h0000000000000001"));
-        assert!(index.contains_key("h0000000000000002"));
-        assert!(!cache_file_path(&dir, "h0000000000000000", "jpg").exists());
-        assert!(index.values().map(|e| e.size).sum::<u64>() <= 250);
-        let _ = std::fs::remove_dir_all(&dir);
+        let removed = enforce_cache_limit(&pool, 250);
+        assert_eq!(removed.len(), 1, "evict just enough to fit capacity");
+        assert!(!cache_file_path(&thumbs, "h0000000000000000", "jpg").exists());
+        assert!(cache_file_path(&thumbs, "h0000000000000001", "jpg").exists());
+        assert!(cache_file_path(&thumbs, "h0000000000000002", "jpg").exists());
+        let _ = std::fs::remove_dir_all(&pool);
     }
 
     #[test]
-    fn prune_lru_keeps_index_within_capacity_when_under_limit() {
-        let dir = temp_cache_dir("lru-under");
-        let mut index = ThumbIndex::new();
-        index.insert(
-            "h0000000000000000".to_string(),
-            ThumbMetaEntry {
-                url: "u".to_string(),
-                size: 10,
-                ext: "jpg".to_string(),
-                last_access_ms: 1,
-            },
+    fn enforce_cache_limit_keeps_files_when_under_limit() {
+        let pool = temp_cache_dir("lru-under");
+        let thumbs = thumbs_cache_dir(&pool);
+        fs::create_dir_all(&thumbs).unwrap();
+        let path = cache_file_path(&thumbs, "h0000000000000000", "jpg");
+        std::fs::write(&path, vec![0u8; 10]).unwrap();
+        let removed = enforce_cache_limit(&pool, 250);
+        assert!(removed.is_empty());
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn enforce_cache_limit_covers_thumbs_and_full_dirs() {
+        let pool = temp_cache_dir("lru-both");
+        let thumbs = thumbs_cache_dir(&pool);
+        fs::create_dir_all(&thumbs).unwrap();
+        let full = full_cache_dir(&pool);
+        fs::create_dir_all(&full).unwrap();
+        let thumb_path = cache_file_path(&thumbs, "t0000000000000001", "jpg");
+        let full_path = full_image_cache_path(&pool, "f0000000000000002", "png");
+        std::fs::write(&thumb_path, vec![0u8; 100]).unwrap();
+        std::fs::write(&full_path, vec![0u8; 100]).unwrap();
+        set_mtime(&thumb_path, 1_000);
+        set_mtime(&full_path, 2_000);
+        let removed = enforce_cache_limit(&pool, 150);
+        assert_eq!(removed.len(), 1);
+        assert!(!thumb_path.exists());
+        assert!(full_path.exists(), "newer full file should survive");
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_put_and_get_roundtrip() {
+        let pool = temp_cache_dir("full-rt");
+        full_image_cache_put(&pool, "abc0000000000001", b"img-bytes", "image/png").unwrap();
+        let (bytes, mime) = full_image_cache_get(&pool, "abc0000000000001").unwrap();
+        assert_eq!(bytes, b"img-bytes");
+        assert_eq!(mime, "image/png");
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_get_missing_returns_none() {
+        let pool = temp_cache_dir("full-miss");
+        assert!(full_image_cache_get(&pool, "def0000000000002").is_none());
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_put_overwrites_existing_entry() {
+        let pool = temp_cache_dir("full-over");
+        full_image_cache_put(&pool, "abc0000000000001", b"old", "image/jpeg").unwrap();
+        full_image_cache_put(&pool, "abc0000000000001", b"new", "image/png").unwrap();
+        let (bytes, mime) = full_image_cache_get(&pool, "abc0000000000001").unwrap();
+        assert_eq!(bytes, b"new");
+        assert_eq!(mime, "image/png");
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_put_failure_propagates() {
+        let pool = temp_cache_dir("full-fail");
+        let blocker = pool.join(FULL_SUBDIR);
+        std::fs::write(&blocker, "i am a file").unwrap();
+        assert!(full_image_cache_put(&pool, "abc0000000000001", b"x", "image/jpeg").is_err());
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_put_rename_failure_cleans_tmp() {
+        let pool = temp_cache_dir("full-rename-fail");
+        let dir = full_cache_dir(&pool);
+        fs::create_dir_all(&dir).unwrap();
+        // 目标路径是已存在目录：rename(file -> dir) 必然失败，tmp 应被清理
+        let target_dir = dir.join("abc0000000000001.jpg");
+        fs::create_dir_all(&target_dir).unwrap();
+        let err = full_image_cache_put(&pool, "abc0000000000001", b"x", "image/jpeg").unwrap_err();
+        assert!(err.contains("cannot rename full cache tmp"));
+        // tmp 文件被清理，目录保留
+        let leftover: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "tmp file should be cleaned up");
+        assert!(target_dir.exists());
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_put_skips_stale_cleanup_when_dir_unreadable() {
+        let pool = temp_cache_dir("full-noread");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = full_cache_dir(&pool);
+            fs::create_dir_all(&dir).unwrap();
+            // 只写不可读：写入 tmp/rename 正常，read_dir 失败时静默跳过清理
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).unwrap();
+            full_image_cache_put(&pool, "abc0000000000001", b"x", "image/jpeg").unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(full_image_cache_get(&pool, "abc0000000000001").is_some());
+        }
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_put_removes_stale_extension_on_rewrite() {
+        let pool = temp_cache_dir("full-stale-ext");
+        full_image_cache_put(&pool, "abc0000000000001", b"old", "image/jpeg").unwrap();
+        // 重写为 png：旧 jpg 条目应被移除
+        full_image_cache_put(&pool, "abc0000000000001", b"new", "image/png").unwrap();
+        let (bytes, mime) = full_image_cache_get(&pool, "abc0000000000001").unwrap();
+        assert_eq!(bytes, b"new");
+        assert_eq!(mime, "image/png");
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn enforce_cache_limit_skips_meta_nonfile_and_bad_metadata() {
+        let pool = temp_cache_dir("lru-skip");
+        let thumbs = thumbs_cache_dir(&pool);
+        fs::create_dir_all(&thumbs).unwrap();
+        // meta 文件跳过
+        std::fs::write(thumbs.join(CACHE_META_FILE), "{}").unwrap();
+        // 子目录跳过
+        std::fs::create_dir_all(thumbs.join("sub")).unwrap();
+        // 常规文件计入
+        let normal = cache_file_path(&thumbs, "a0000000000000001", "jpg");
+        std::fs::write(&normal, vec![0u8; 10]).unwrap();
+        // broken symlink：metadata 失败，跳过
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nonexistent-target", thumbs.join("broken.png")).unwrap();
+        let removed = enforce_cache_limit(&pool, 5);
+        assert_eq!(
+            removed.len(),
+            1,
+            "only normal file beyond capacity is evicted"
         );
-        prune_lru_locked(&dir, &mut index, 250);
-        assert_eq!(index.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!normal.exists());
+        assert!(thumbs.join(CACHE_META_FILE).exists());
+        assert!(thumbs.join("sub").exists());
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_size_skips_meta_and_dirs() {
+        let pool = temp_cache_dir("size-skip");
+        let thumbs = thumbs_cache_dir(&pool);
+        fs::create_dir_all(&thumbs).unwrap();
+        std::fs::write(thumbs.join(CACHE_META_FILE), "{}").unwrap();
+        fs::create_dir_all(thumbs.join("dir.png")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("nonexistent-target", thumbs.join("broken.png")).unwrap();
+        std::fs::write(
+            cache_file_path(&thumbs, "b0000000000000001", "png"),
+            vec![0u8; 7],
+        )
+        .unwrap();
+        let (total, thumb, full_bytes) = full_image_cache_size(&pool);
+        assert_eq!(thumb, 7);
+        assert_eq!(full_bytes, 0);
+        assert_eq!(total, 7);
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn clear_wallpaper_cache_propagates_remove_error() {
+        let pool = temp_cache_dir("clear-err");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let full = full_cache_dir(&pool);
+            fs::create_dir_all(&full).unwrap();
+            let file = full_image_cache_path(&pool, "c0000000000000001", "png");
+            std::fs::write(&file, b"x").unwrap();
+            // 只读目录使 remove_file 失败
+            fs::set_permissions(&full, fs::Permissions::from_mode(0o500)).unwrap();
+            assert!(clear_wallpaper_cache(&pool).is_err());
+            fs::set_permissions(&full, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn full_image_cache_size_breaks_down_by_subdir() {
+        let pool = temp_cache_dir("size");
+        let thumbs = thumbs_cache_dir(&pool);
+        let full = full_cache_dir(&pool);
+        fs::create_dir_all(&thumbs).unwrap();
+        fs::create_dir_all(&full).unwrap();
+        std::fs::write(
+            cache_file_path(&thumbs, "t0000000000000001", "jpg"),
+            vec![0u8; 10],
+        )
+        .unwrap();
+        std::fs::write(
+            full_image_cache_path(&pool, "f0000000000000002", "png"),
+            vec![0u8; 20],
+        )
+        .unwrap();
+        let (total, thumb, full_bytes) = full_image_cache_size(&pool);
+        assert_eq!(thumb, 10);
+        assert_eq!(full_bytes, 20);
+        assert_eq!(total, 30);
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn clear_wallpaper_cache_removes_cache_files_only() {
+        let pool = temp_cache_dir("clear");
+        let thumbs = thumbs_cache_dir(&pool);
+        let full = full_cache_dir(&pool);
+        fs::create_dir_all(&thumbs).unwrap();
+        fs::create_dir_all(&full).unwrap();
+        let thumb_path = cache_file_path(&thumbs, "t0000000000000001", "jpg");
+        let full_path = full_image_cache_path(&pool, "f0000000000000002", "png");
+        std::fs::write(&thumb_path, b"a").unwrap();
+        std::fs::write(&full_path, b"bb").unwrap();
+        std::fs::write(thumbs.join(CACHE_META_FILE), "{}").unwrap();
+        // 非文件条目（子目录）不被删除
+        fs::create_dir_all(full.join("subdir.png")).unwrap();
+        clear_wallpaper_cache(&pool).unwrap();
+        assert!(!thumb_path.exists());
+        assert!(!full_path.exists());
+        assert!(thumbs.join(CACHE_META_FILE).exists(), "meta preserved");
+        assert!(full.join("subdir.png").exists(), "subdir not touched");
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn clear_wallpaper_cache_missing_dirs_is_ok() {
+        let pool = temp_cache_dir("clear-miss");
+        assert!(clear_wallpaper_cache(&pool).is_ok());
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn cache_limit_clamps_to_range_and_default() {
+        assert_eq!(
+            WallpaperSettings::default().cache_limit(),
+            DEFAULT_CACHE_LIMIT_BYTES
+        );
+        let small = WallpaperSettings {
+            cache_limit_bytes: Some(1),
+            ..WallpaperSettings::default()
+        };
+        assert_eq!(small.cache_limit(), MIN_CACHE_LIMIT_BYTES);
+        let huge = WallpaperSettings {
+            cache_limit_bytes: Some(999_999_999_999),
+            ..WallpaperSettings::default()
+        };
+        assert_eq!(huge.cache_limit(), MAX_CACHE_LIMIT_BYTES);
+        let exact = WallpaperSettings {
+            cache_limit_bytes: Some(5_000_000_000),
+            ..WallpaperSettings::default()
+        };
+        assert_eq!(exact.cache_limit(), 5_000_000_000);
+    }
+
+    #[test]
+    fn full_image_cache_path_joins_full_subdir() {
+        let pool = Path::new("/pool");
+        assert_eq!(
+            full_image_cache_path(pool, "abc0000000000001", "png"),
+            PathBuf::from("/pool/full/abc0000000000001.png")
+        );
+    }
+
+    #[test]
+    fn hash_from_cache_path_parses_hash_and_ext() {
+        assert_eq!(
+            hash_from_cache_path(Path::new("/a/b/abc0000000000001.png")),
+            Some("abc0000000000001".to_string())
+        );
+        assert_eq!(hash_from_cache_path(Path::new("/a/b/noext")), None);
     }
 
     #[test]
@@ -1966,6 +2460,8 @@ mod tests {
             proxy: None,
             download_dir: Some(dir.display().to_string()),
             sources: HashMap::new(),
+            cache_limit_bytes: None,
+            cache_root: None,
             base_urls: HashMap::new(),
         };
         let path = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap();
@@ -1993,12 +2489,47 @@ mod tests {
             proxy: None,
             download_dir: Some(dir.display().to_string()),
             sources: HashMap::new(),
+            cache_limit_bytes: None,
+            cache_root: None,
             base_urls: HashMap::new(),
         };
         let path = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap();
         assert!(path.ends_with("danbooru-42.png"));
         assert_eq!(read_body(Path::new(&path)), "png-bytes");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_wallpaper_uses_cache_when_full_image_hit() {
+        let pool = temp_cache_dir("dl-cache-hit");
+        let server = MockServer::new(vec![(200, "cached-dl-bytes", "image/png")]);
+        let item = WallpaperItem {
+            id: "wallhaven-cached1".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            thumb_hash: String::new(),
+            full_url: format!("{}/img", server.base_url()),
+            width: 1920,
+            height: 1080,
+        };
+        let dl_dir =
+            std::env::temp_dir().join(format!("workstation-wall-dl-cached-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dl_dir);
+        let settings = WallpaperSettings {
+            download_dir: Some(dl_dir.display().to_string()),
+            cache_root: Some(pool.display().to_string()),
+            ..WallpaperSettings::default()
+        };
+        // 先拉一次进缓存
+        tauri::async_runtime::block_on(fetch_full_image(item.clone(), settings.clone())).unwrap();
+        assert_eq!(server.hit_count(), 1);
+        // 下载应命中缓存，零网络
+        let path = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap();
+        assert!(path.ends_with("wallhaven-cached1.png"));
+        assert_eq!(read_body(Path::new(&path)), "cached-dl-bytes");
+        assert_eq!(server.hit_count(), 1, "download must reuse cache");
+        let _ = std::fs::remove_dir_all(&pool);
+        let _ = std::fs::remove_dir_all(&dl_dir);
     }
 
     #[test]
@@ -2015,7 +2546,7 @@ mod tests {
         };
         let settings = WallpaperSettings::default();
         let err = tauri::async_runtime::block_on(download_wallpaper(item, settings)).unwrap_err();
-        assert!(err.contains("download"));
+        assert!(err.contains("full image"));
     }
 
     #[test]
@@ -2519,6 +3050,49 @@ mod tests {
         assert_eq!(bytes, b"full-image-bytes");
         assert_eq!(mime, "image/png");
         assert_eq!(server.hit_count(), 1);
+    }
+
+    #[test]
+    fn fetch_full_image_hits_cache_without_network() {
+        let pool = temp_cache_dir("full-cache-hit");
+        let server = MockServer::new(vec![(200, "cached-bytes", "image/png")]);
+        let item = full_image_item(format!("{}/full", server.base_url()));
+        let settings = WallpaperSettings {
+            cache_root: Some(pool.display().to_string()),
+            ..WallpaperSettings::default()
+        };
+        let (bytes, mime) =
+            tauri::async_runtime::block_on(fetch_full_image(item.clone(), settings.clone()))
+                .unwrap();
+        assert_eq!(bytes, b"cached-bytes");
+        assert_eq!(mime, "image/png");
+        assert_eq!(server.hit_count(), 1);
+        assert!(full_image_cache_get(&pool, &thumb_hash(&item.full_url)).is_some());
+        // 第二次请求应命中缓存，零网络
+        let (bytes2, mime2) =
+            tauri::async_runtime::block_on(fetch_full_image(item, settings)).unwrap();
+        assert_eq!(bytes2, b"cached-bytes");
+        assert_eq!(mime2, "image/png");
+        assert_eq!(server.hit_count(), 1, "cache hit must not hit network");
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn fetch_full_image_cache_put_failure_still_returns_bytes() {
+        let pool = temp_cache_dir("full-cache-put-fail");
+        let blocker = pool.join(FULL_SUBDIR);
+        std::fs::write(&blocker, "i am a file").unwrap();
+        let server = MockServer::new(vec![(200, "bytes-ok", "image/jpeg")]);
+        let item = full_image_item(format!("{}/img", server.base_url()));
+        let settings = WallpaperSettings {
+            cache_root: Some(pool.display().to_string()),
+            ..WallpaperSettings::default()
+        };
+        let (bytes, mime) =
+            tauri::async_runtime::block_on(fetch_full_image(item, settings)).unwrap();
+        assert_eq!(bytes, b"bytes-ok");
+        assert_eq!(mime, "image/jpeg");
+        let _ = std::fs::remove_dir_all(&pool);
     }
 
     #[test]
