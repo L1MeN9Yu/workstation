@@ -368,7 +368,9 @@ pub async fn search_wallpapers(
                 let hash = item.thumb_hash.clone();
                 tasks.push(tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<ThumbState>();
-                    let _ = state.get_or_fetch(&hash, &settings).await;
+                    if let Err(e) = state.get_or_fetch(&hash, &settings).await {
+                        log::error!("thumb prefetch failed (hash={hash}): {e}");
+                    }
                 }));
             }
             for task in tasks {
