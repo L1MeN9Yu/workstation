@@ -19,6 +19,8 @@ import {
   type Theme,
 } from "../store/theme";
 import { ToolPage } from "./ToolPage";
+import OpenLogDirButton from "../components/OpenLogDirButton";
+import { currentLogFile } from "../lib/logging";
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null || bytes <= 0) {
@@ -457,14 +459,66 @@ function CmuxSection() {
   );
 }
 
-type SettingsTab = "appearance" | "update" | "proxy" | "cmux";
+type SettingsTab = "appearance" | "update" | "proxy" | "cmux" | "logging";
 
 const TAB_OPTIONS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "外观" },
   { id: "update", label: "应用更新" },
   { id: "proxy", label: "网络代理" },
   { id: "cmux", label: "cmux" },
+  { id: "logging", label: "日志" },
 ];
+
+function LogSection() {
+  const [logFile, setLogFile] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void currentLogFile()
+      .then((path) => {
+        if (!cancelled) {
+          setLogFile(path);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <section className="max-w-xl rounded-lg border border-gray-200 p-4 dark:border-gray-700">
+      <h3 className="mb-1 text-sm font-semibold">应用日志</h3>
+      <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+        后端与前端运行日志已写入本地日志目录，可在日志目录中查看。
+      </p>
+      <div className="mb-3 text-sm">
+        {error ? (
+          <p className="text-xs text-red-500 dark:text-red-400">
+            无法获取日志路径：{error}
+          </p>
+        ) : logFile === null ? (
+          <p className="text-xs text-gray-400">正在获取日志路径...</p>
+        ) : (
+          <>
+            <span className="mb-1 block text-xs text-gray-500 dark:text-gray-400">
+              当前进程写入日志文件
+            </span>
+            <code className="break-all rounded-md bg-gray-100 px-2 py-1 font-mono text-xs text-gray-800 dark:bg-gray-800 dark:text-gray-200">
+              {logFile}
+            </code>
+          </>
+        )}
+      </div>
+      <OpenLogDirButton />
+    </section>
+  );
+}
 
 export default function Settings() {
   const [tab, setTab] = useState<SettingsTab>("appearance");
@@ -490,6 +544,7 @@ export default function Settings() {
       {tab === "update" && <UpdateSection />}
       {tab === "proxy" && <ProxySection />}
       {tab === "cmux" && <CmuxSection />}
+      {tab === "logging" && <LogSection />}
     </ToolPage>
   );
 }

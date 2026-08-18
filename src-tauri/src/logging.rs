@@ -21,6 +21,12 @@ pub fn session_log_path(dir: &Path) -> PathBuf {
     dir.join(SESSION_LOG_FILE)
 }
 
+/// 解析当前会话日志文件路径：目录解析成功时拼接会话文件名，失败时透传错误。
+/// 目录结果由调用方（tauri 壳）注入，便于单元测试覆盖成功与失败分支。
+pub fn current_log_file_with(log_dir_result: Result<PathBuf, String>) -> Result<PathBuf, String> {
+    log_dir_result.map(|dir| session_log_path(&dir))
+}
+
 fn startup_timestamp() -> String {
     Local::now().format("%Y%m%d-%H%M%S%.3f").to_string()
 }
@@ -239,6 +245,19 @@ mod tests {
     fn session_log_path_is_fixed_name() {
         let dir = Path::new("/tmp/logs");
         assert_eq!(session_log_path(dir), dir.join("workstation.log"));
+    }
+
+    #[test]
+    fn current_log_file_joins_session_file_when_dir_resolves() {
+        let dir = PathBuf::from("/tmp/logs");
+        let got = current_log_file_with(Ok(dir.clone())).unwrap();
+        assert_eq!(got, session_log_path(&dir));
+    }
+
+    #[test]
+    fn current_log_file_propagates_dir_error() {
+        let err = current_log_file_with(Err("cannot resolve app log dir".to_string())).unwrap_err();
+        assert_eq!(err, "cannot resolve app log dir");
     }
 
     #[test]

@@ -1166,6 +1166,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    /// 串行化共享全局缩略图缓存（THUMB_CACHE）的测试，避免并发清空导致淘汰路径竞态。
+    static THUMB_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     struct MockServer {
         addr: String,
         counter: Arc<AtomicUsize>,
@@ -3453,6 +3456,7 @@ mod tests {
 
     #[test]
     fn cached_thumbnail_data_url_reuses_cache_entry() {
+        let _guard = THUMB_CACHE_TEST_LOCK.lock().unwrap();
         clear_thumb_cache();
         let dir = temp_cache_dir("local-cache");
         let img = dir.join("cached.png");
@@ -3469,6 +3473,7 @@ mod tests {
 
     #[test]
     fn cached_thumbnail_data_url_evicts_oldest_beyond_capacity() {
+        let _guard = THUMB_CACHE_TEST_LOCK.lock().unwrap();
         clear_thumb_cache();
         let dir = temp_cache_dir("local-cache-cap");
         for i in 0..(THUMB_CACHE_MAX + 5) {
@@ -3488,6 +3493,7 @@ mod tests {
 
     #[test]
     fn cached_thumbnail_data_url_does_not_cache_failures() {
+        let _guard = THUMB_CACHE_TEST_LOCK.lock().unwrap();
         clear_thumb_cache();
         let dir = temp_cache_dir("local-cache-fail");
         let missing = dir.join("nope.png");
