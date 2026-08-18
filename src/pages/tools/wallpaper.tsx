@@ -18,11 +18,8 @@ import {
   RATIO_OPTIONS,
   applyWallpaper,
   bitsToSelections,
-  clearWallpaperCache,
   downloadWallpaper,
-  formatFileSize,
   generateSeed,
-  getWallpaperCacheStats,
   hasWallpaperFullCache,
   loadWallpaperSettings,
   previewWallpaper,
@@ -33,7 +30,6 @@ import {
   thumbUrl,
   type ApplyWallpaperTarget,
   type SourceSettings,
-  type WallpaperCacheStats,
   type WallpaperItem,
   type WallpaperSettings,
 } from "../../lib/wallpaper";
@@ -288,12 +284,6 @@ export default function WallpaperTool() {
   const [errors, setErrors] = useState<SearchError[]>([]);
   const [settings, setSettings] = useState<WallpaperSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  /** 缓存池占用统计（设置面板展示） */
-  const [cacheStats, setCacheStats] = useState<WallpaperCacheStats | null>(null);
-  /** 清空缓存的二次确认弹窗状态 */
-  const [confirmClearCache, setConfirmClearCache] = useState(false);
-  /** 清空缓存进行中 */
-  const [clearingCache, setClearingCache] = useState(false);
   const [applyingId, setApplyingId] = useState<string | null>(null);
   /** 本次应用目标（单次切换，不持久化） */
   const [applyTarget, setApplyTarget] = useState<ApplyWallpaperTarget>("cmux");
@@ -575,20 +565,6 @@ export default function WallpaperTool() {
 
   useEffect(() => {
     let cancelled = false;
-    void loadWallpaperSettings().then((s) => {
-      if (!cancelled) {
-        setSettings(s);
-        // 以默认目标初始化本次应用目标（用户单次切换后不再覆盖）
-        setApplyTarget(s.defaultApplyTarget);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
     void listIterm2Profiles()
       .then((profiles) => {
         if (!cancelled) {
@@ -700,33 +676,17 @@ export default function WallpaperTool() {
 
   useEffect(() => {
     let cancelled = false;
-    void getWallpaperCacheStats()
-      .then((stats) => {
-        if (!cancelled) {
-          setCacheStats(stats);
-        }
-      })
-      .catch(() => {
-        // 非 Tauri 环境（测试）时忽略，占用展示保持空态
-      });
+    void loadWallpaperSettings().then((s) => {
+      if (!cancelled) {
+        setSettings(s);
+        // 以默认目标初始化本次应用目标（用户单次切换后不再覆盖）
+        setApplyTarget(s.defaultApplyTarget);
+      }
+    });
     return () => {
       cancelled = true;
     };
   }, []);
-
-  async function handleClearCache(): Promise<void> {
-    setClearingCache(true);
-    try {
-      await clearWallpaperCache();
-      toast.success("缓存已清空");
-      setCacheStats(await getWallpaperCacheStats());
-    } catch (e) {
-      toast.error(`清空缓存失败：${String(e)}`);
-    } finally {
-      setClearingCache(false);
-      setConfirmClearCache(false);
-    }
-  }
 
   async function handleSaveSettings() {
     if (!settings) return;
@@ -734,11 +694,6 @@ export default function WallpaperTool() {
       await saveWallpaperProxy(settings);
       toast.success("设置已保存");
       setShowSettings(false);
-      try {
-        setCacheStats(await getWallpaperCacheStats());
-      } catch {
-        // 占用刷新失败不影响保存结果提示
-      }
     } catch (e) {
       toast.error(`保存设置失败：${String(e)}`);
     }
@@ -907,64 +862,6 @@ export default function WallpaperTool() {
               ))}
             </select>
           </label>
-          <div className="border-t border-gray-200 pt-3 text-sm font-medium dark:border-gray-700">
-            壁纸缓存
-          </div>
-          <label className="block text-sm">
-            缓存容量上限（GB，范围 1–200，默认 50）
-            <input
-              type="number"
-              min={1}
-              max={200}
-              value={Math.round(settings.cacheLimitBytes / (1024 * 1024 * 1024))}
-              onChange={(e) => {
-                const gb = Number(e.target.value);
-                setSettings({
-                  ...settings,
-                  cacheLimitBytes: Number.isFinite(gb)
-                    ? Math.round(gb) * 1024 * 1024 * 1024
-                    : settings.cacheLimitBytes,
-                });
-              }}
-              className={inputClass}
-            />
-          </label>
-          {cacheStats && (
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              已用 {formatFileSize(cacheStats.totalBytes)} / 上限{" "}
-              {formatFileSize(cacheStats.limitBytes)}
-              <span className="mx-1">·</span>
-              缩略图 {formatFileSize(cacheStats.thumbBytes)}
-              <span className="mx-1">·</span>
-              原图 {formatFileSize(cacheStats.fullBytes)}
-            </div>
-          )}
-          {confirmClearCache ? (
-            <div className="flex items-center gap-2 text-xs">
-              <span>确认清空缓存？仅删除缓存文件，不影响已下载壁纸。</span>
-              <button
-                onClick={() => void handleClearCache()}
-                disabled={clearingCache}
-                className="rounded-md bg-red-600 px-2 py-1 text-white disabled:opacity-50"
-              >
-                {clearingCache ? "清空中..." : "确认清空"}
-              </button>
-              <button
-                onClick={() => setConfirmClearCache(false)}
-                disabled={clearingCache}
-                className="rounded-md bg-gray-300 px-2 py-1 dark:bg-gray-600"
-              >
-                取消
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmClearCache(true)}
-              className="rounded-md bg-gray-200 px-2 py-1 text-xs text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
-            >
-              清空缓存
-            </button>
-          )}
           <button
             onClick={() => void handleSaveSettings()}
             className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white"

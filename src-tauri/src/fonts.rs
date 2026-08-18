@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::Mutex;
 
 pub fn unique_families(faces: &[fontdb::FaceInfo]) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -21,29 +20,24 @@ pub fn list_font_families_with(load: impl Fn() -> Vec<fontdb::FaceInfo>) -> Vec<
     unique_families(&load())
 }
 
-/// 进程内字体列表缓存（Tauri managed state）。首次枚举后复用，避免重复全量扫描。
-#[derive(Default)]
-pub struct FontCache(pub Mutex<Option<Vec<String>>>);
-
-pub fn list_font_families_cached(
-    cache: &Mutex<Option<Vec<String>>>,
-    load: impl Fn() -> Vec<fontdb::FaceInfo>,
-) -> Vec<String> {
+/// 经通用 app 缓存的字体列表枚举：首次枚举后进程内复用，避免重复全量扫描。
+pub fn list_font_families_cached(load: impl Fn() -> Vec<fontdb::FaceInfo>) -> Vec<String> {
+    const FONT_CACHE_KEY: &str = "families";
+    if let Some(families) =
+        crate::app_cache::get::<Vec<String>>(crate::app_cache::NS_FONTS, FONT_CACHE_KEY)
     {
-        let guard = cache.lock().unwrap();
-        if let Some(families) = guard.as_ref() {
-            return families.clone();
-        }
+        return families;
     }
     let families = list_font_families_with(load);
-    let mut guard = cache.lock().unwrap();
-    *guard = Some(families.clone());
+    crate::app_cache::insert(crate::app_cache::NS_FONTS, FONT_CACHE_KEY, families.clone());
     families
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::app_cache::APP_CACHE_TEST_LOCK;
 
     fn face(family: Option<&str>) -> fontdb::FaceInfo {
         fontdb::FaceInfo {
@@ -138,18 +132,20 @@ mod tests {
 
     #[test]
     fn cached_enumeration_loads_on_miss_and_stores() {
-        let cache = Mutex::new(None);
+        let _guard = APP_CACHE_TEST_LOCK.lock().unwrap();
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let families = list_font_families_cached(&cache, || {
+        let families = list_font_families_cached(|| {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             sample_faces()
         });
         assert_eq!(families, vec!["Arial".to_string(), "Menlo".to_string()]);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
-            *cache.lock().unwrap(),
+            crate::app_cache::get::<Vec<String>>(crate::app_cache::NS_FONTS, "families"),
             Some(vec!["Arial".to_string(), "Menlo".to_string()])
         );
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
     }
 
     fn sample_faces() -> Vec<fontdb::FaceInfo> {
@@ -158,39 +154,70 @@ mod tests {
 
     #[test]
     fn cached_enumeration_reuses_cache_without_reloading() {
-        let cache = Mutex::new(Some(vec!["Menlo".to_string()]));
+        let _guard = APP_CACHE_TEST_LOCK.lock().unwrap();
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
+        crate::app_cache::insert(
+            crate::app_cache::NS_FONTS,
+            "families",
+            vec!["Menlo".to_string()],
+        );
         // 缓存命中时 load 不被执行（若执行则返回 Skipped），证明复用缓存。
-        let families = list_font_families_cached(&cache, || vec![face(Some("Skipped"))]);
+        let families = list_font_families_cached(|| vec![face(Some("Skipped"))]);
         assert_eq!(families, vec!["Menlo".to_string()]);
-        assert_eq!(*cache.lock().unwrap(), Some(vec!["Menlo".to_string()]));
+        assert_eq!(
+            crate::app_cache::get::<Vec<String>>(crate::app_cache::NS_FONTS, "families"),
+            Some(vec!["Menlo".to_string()])
+        );
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
     }
 
     #[test]
     fn cached_enumeration_empty_load_still_caches_empty() {
-        let cache = Mutex::new(None);
-        let families = list_font_families_cached(&cache, Vec::new);
+        let _guard = APP_CACHE_TEST_LOCK.lock().unwrap();
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
+        let families = list_font_families_cached(Vec::new);
         assert!(families.is_empty());
-        assert_eq!(*cache.lock().unwrap(), Some(vec![]));
+        assert_eq!(
+            crate::app_cache::get::<Vec<String>>(crate::app_cache::NS_FONTS, "families"),
+            Some(vec![])
+        );
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
+    }
+
+    #[test]
+    fn cached_enumeration_reloads_after_cache_clear() {
+        let _guard = APP_CACHE_TEST_LOCK.lock().unwrap();
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let load = || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![face(Some("Menlo"))]
+        };
+        assert_eq!(list_font_families_cached(load), vec!["Menlo".to_string()]);
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
+        assert_eq!(list_font_families_cached(load), vec!["Menlo".to_string()]);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
     }
 
     #[test]
     fn cached_enumeration_concurrent_reads_are_safe() {
-        let cache = Mutex::new(Some(vec!["Menlo".to_string()]));
+        let _guard = APP_CACHE_TEST_LOCK.lock().unwrap();
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
+        crate::app_cache::insert(
+            crate::app_cache::NS_FONTS,
+            "families",
+            vec!["Menlo".to_string()],
+        );
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
             for _ in 0..8 {
-                let cache = &cache;
-                handles.push(scope.spawn(move || list_font_families_cached(cache, Vec::new)));
+                handles.push(scope.spawn(|| list_font_families_cached(Vec::new)));
             }
             for handle in handles {
                 assert_eq!(handle.join().unwrap(), vec!["Menlo".to_string()]);
             }
         });
-    }
-
-    #[test]
-    fn font_cache_default_is_unpopulated() {
-        let cache = FontCache::default();
-        assert!(cache.0.lock().unwrap().is_none());
+        crate::app_cache::clear_namespace(crate::app_cache::NS_FONTS);
     }
 }

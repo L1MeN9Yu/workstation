@@ -336,11 +336,11 @@ export async function loadWallpaperSettings(): Promise<WallpaperSettings> {
   };
 }
 
-/** 保存代理/下载目录/应用目标/缓存容量（全局网络配置，手动保存） */
+/** 保存代理/下载目录/应用目标（缓存容量等全局网络配置已移至设置页 app 级配置） */
 export async function saveWallpaperProxy(
   settings: Pick<
     WallpaperSettings,
-    "downloadDir" | "defaultApplyTarget" | "iterm2Profile" | "cacheLimitBytes"
+    "downloadDir" | "defaultApplyTarget" | "iterm2Profile"
   >,
 ): Promise<void> {
   await writeConfig(SETTINGS_KEY, settings);

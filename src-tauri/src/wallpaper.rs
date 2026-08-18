@@ -13,10 +13,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 const USER_AGENT: &str = "workstation-wallpaper/0.1";
 const DEFAULT_MIN_WIDTH: u32 = 1920;
 const CACHE_META_FILE: &str = "cache_meta.json";
-/// 缓存容量默认上限：50GB（十进制字节）。范围 1GB–200GB，可在设置中调整。
-pub const DEFAULT_CACHE_LIMIT_BYTES: u64 = 50_000_000_000;
-const MIN_CACHE_LIMIT_BYTES: u64 = 1_000_000_000;
-const MAX_CACHE_LIMIT_BYTES: u64 = 200_000_000_000;
 /// 缓存池子目录：缩略图缓存目录（ThumbState.dir 的管理根）。
 pub const THUMBS_SUBDIR: &str = "thumbs";
 /// 缓存池子目录：原图缓存目录。
@@ -113,9 +109,10 @@ impl WallpaperSettings {
 
     /// 有效缓存上限（字节）：配置值超范围时收敛到 [1GB, 200GB]，未配置用默认 50GB。
     pub fn cache_limit(&self) -> u64 {
-        self.cache_limit_bytes
-            .unwrap_or(DEFAULT_CACHE_LIMIT_BYTES)
-            .clamp(MIN_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
+        crate::app_cache::CacheSettings {
+            cache_limit_bytes: self.cache_limit_bytes,
+        }
+        .cache_limit()
     }
 }
 
@@ -591,31 +588,9 @@ pub struct LocalWallpaperEntry {
 }
 
 /// 缩略图内存缓存：`(路径, 修改时间, 文件大小) -> data URL`，文件未变化时复用，
-/// 避免每次进入本地壁纸库都重新解码大图。
-use std::sync::{LazyLock, Mutex};
-
-type ThumbCacheKey = (String, u64, u64);
-type ThumbCache = HashMap<ThumbCacheKey, String>;
-
-static THUMB_CACHE: LazyLock<Mutex<ThumbCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-const THUMB_CACHE_MAX: usize = 256;
-
-fn thumb_cache_get(key: &ThumbCacheKey) -> Option<String> {
-    THUMB_CACHE.lock().ok()?.get(key).cloned()
-}
-
-fn thumb_cache_insert(key: ThumbCacheKey, value: String) {
-    let mut guard = THUMB_CACHE.lock().unwrap();
-    if guard.len() >= THUMB_CACHE_MAX && !guard.contains_key(&key) {
-        if let Some(oldest) = guard.keys().next().cloned() {
-            guard.remove(&oldest);
-        }
-    }
-    guard.insert(key, value);
-}
-
-fn thumb_cache_key(path: &Path, size_bytes: u64, modified_ms: u64) -> ThumbCacheKey {
-    (path.display().to_string(), size_bytes, modified_ms)
+/// 避免每次进入本地壁纸库都重新解码大图。存储由通用 app 缓存提供。
+fn thumb_cache_key(path: &Path, size_bytes: u64, modified_ms: u64) -> String {
+    format!("{}:{}:{}", path.display(), size_bytes, modified_ms)
 }
 
 /// 生成缩略图 data URL：解码图片并缩放到最大边不超过 `max_edge` 像素，
@@ -651,17 +626,17 @@ pub fn cached_thumbnail_data_url(
     max_edge: u32,
 ) -> Option<String> {
     let key = thumb_cache_key(path, size_bytes, modified_ms);
-    if let Some(url) = thumb_cache_get(&key) {
+    if let Some(url) = crate::app_cache::get::<String>(crate::app_cache::NS_THUMBS, &key) {
         return Some(url);
     }
     let url = thumbnail_data_url(path, max_edge)?;
-    thumb_cache_insert(key, url.clone());
+    crate::app_cache::insert(crate::app_cache::NS_THUMBS, &key, url.clone());
     Some(url)
 }
 
 /// 清理缩略图内存缓存（测试与目录变更时使用）。
 pub fn clear_thumb_cache() {
-    let _ = THUMB_CACHE.lock().map(|mut g| g.clear());
+    crate::app_cache::clear_namespace(crate::app_cache::NS_THUMBS);
 }
 
 /// 列出本地壁纸目录中的壁纸文件（按修改时间倒序），供 tauri 命令注入实现。
@@ -1166,8 +1141,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    /// 串行化共享全局缩略图缓存（THUMB_CACHE）的测试，避免并发清空导致淘汰路径竞态。
-    static THUMB_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// 串行化共享全局缩略图缓存（app_cache）的测试，避免并发清空导致淘汰路径竞态。
+    use crate::app_cache::APP_CACHE_TEST_LOCK as THUMB_CACHE_TEST_LOCK;
 
     struct MockServer {
         addr: String,
@@ -1980,8 +1955,10 @@ mod tests {
         {
             use std::io::Seek;
             let mut f = std::fs::File::create(&old_full).unwrap();
-            f.seek(std::io::SeekFrom::Start(MIN_CACHE_LIMIT_BYTES + 1))
-                .unwrap();
+            f.seek(std::io::SeekFrom::Start(
+                crate::app_cache::MIN_CACHE_LIMIT_BYTES + 1,
+            ))
+            .unwrap();
             f.write_all(&[0u8; 1]).unwrap();
         }
         set_mtime(&old_full, 1_000);
@@ -1990,7 +1967,7 @@ mod tests {
         let state = state_with(&dir, &url);
         let hash = thumb_hash(&url);
         let settings = WallpaperSettings {
-            cache_limit_bytes: Some(MIN_CACHE_LIMIT_BYTES),
+            cache_limit_bytes: Some(crate::app_cache::MIN_CACHE_LIMIT_BYTES),
             ..empty_settings()
         };
         tauri::async_runtime::block_on(state.get_or_fetch(&hash, &settings)).unwrap();
@@ -2284,6 +2261,9 @@ mod tests {
 
     #[test]
     fn cache_limit_clamps_to_range_and_default() {
+        use crate::app_cache::{
+            DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES, MIN_CACHE_LIMIT_BYTES,
+        };
         assert_eq!(
             WallpaperSettings::default().cache_limit(),
             DEFAULT_CACHE_LIMIT_BYTES
@@ -3476,7 +3456,7 @@ mod tests {
         let _guard = THUMB_CACHE_TEST_LOCK.lock().unwrap();
         clear_thumb_cache();
         let dir = temp_cache_dir("local-cache-cap");
-        for i in 0..(THUMB_CACHE_MAX + 5) {
+        for i in 0..(crate::app_cache::APP_CACHE_MAX + 5) {
             let img = dir.join(format!("cap-{i}.png"));
             write_png(&img, 4, 4);
             let size = fs::metadata(&img).unwrap().len();
@@ -3484,8 +3464,13 @@ mod tests {
             assert!(!url.is_empty());
         }
         {
-            let guard = THUMB_CACHE.lock().unwrap();
-            assert!(guard.len() <= THUMB_CACHE_MAX);
+            let stats = crate::app_cache::stats();
+            let thumb_entries = stats
+                .namespaces
+                .get(crate::app_cache::NS_THUMBS)
+                .copied()
+                .unwrap_or(0);
+            assert!(thumb_entries <= crate::app_cache::APP_CACHE_MAX);
         }
         clear_thumb_cache();
         let _ = fs::remove_dir_all(&dir);
@@ -3500,8 +3485,13 @@ mod tests {
         let url = cached_thumbnail_data_url(&missing, 0, 0, 400);
         assert!(url.is_none());
         {
-            let guard = THUMB_CACHE.lock().unwrap();
-            assert!(guard.is_empty());
+            let stats = crate::app_cache::stats();
+            let thumb_entries = stats
+                .namespaces
+                .get(crate::app_cache::NS_THUMBS)
+                .copied()
+                .unwrap_or(0);
+            assert_eq!(thumb_entries, 0);
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3509,7 +3499,7 @@ mod tests {
     #[test]
     fn thumb_cache_key_uses_path_size_and_mtime() {
         let key = thumb_cache_key(Path::new("/w/a.png"), 100, 200);
-        assert_eq!(key, ("/w/a.png".to_string(), 100, 200));
+        assert_eq!(key, "/w/a.png:100:200");
         let other = thumb_cache_key(Path::new("/w/a.png"), 101, 200);
         assert_ne!(key, other);
     }

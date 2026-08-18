@@ -21,6 +21,14 @@ import {
 import { ToolPage } from "./ToolPage";
 import OpenLogDirButton from "../components/OpenLogDirButton";
 import { currentLogFile } from "../lib/logging";
+import {
+  getCacheSettings,
+  getCacheStats,
+  saveCacheSettings,
+  clearCache,
+  type CacheStats,
+} from "../lib/cacheSettings";
+import { formatFileSize } from "../lib/wallpaper";
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null || bytes <= 0) {
@@ -233,6 +241,144 @@ function ProxySection() {
         <Button variant="secondary" onClick={handleSave} disabled={saving || proxy === null}>
           {saving ? "保存中..." : "保存"}
         </Button>
+      </div>
+    </section>
+  );
+}
+
+function CacheSection() {
+  const [limitGb, setLimitGb] = useState<number | null>(null);
+  const [stats, setStats] = useState<CacheStats | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  async function refreshStats(): Promise<void> {
+    try {
+      setStats(await getCacheStats());
+    } catch {
+      // 非 Tauri 环境（测试）或读取失败时占用展示保持空态
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCacheSettings().then((bytes) => {
+      if (!cancelled) {
+        setLimitGb(Math.round(bytes / (1024 * 1024 * 1024)));
+      }
+    });
+    void getCacheStats().then((stats) => {
+      if (!cancelled) {
+        setStats(stats);
+      }
+    }).catch(() => {
+      // 非 Tauri 环境（测试）或读取失败时占用展示保持空态
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleSave(): Promise<void> {
+    if (limitGb === null || !Number.isFinite(limitGb)) return;
+    setSaving(true);
+    try {
+      await saveCacheSettings(limitGb * 1024 * 1024 * 1024);
+      toast.success("缓存容量已保存");
+      await refreshStats();
+    } catch (e) {
+      toast.error(`保存缓存容量失败：${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleClear(): Promise<void> {
+    setClearing(true);
+    try {
+      await clearCache();
+      toast.success("缓存已清空");
+      setConfirmingClear(false);
+      await refreshStats();
+    } catch (e) {
+      toast.error(`清空缓存失败：${String(e)}`);
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  return (
+    <section className="max-w-xl rounded-lg border border-gray-200 p-4 dark:border-gray-700">
+      <h3 className="mb-1 text-sm font-semibold">应用缓存</h3>
+      <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+        壁纸缩略图与原图等缓存共用的容量上限与占用情况；清空仅删除缓存文件，不影响本地壁纸库与配置。
+      </p>
+      <label className="block text-sm">
+        缓存容量上限（GB，范围 1–200，默认 50）
+        <input
+          type="number"
+          min={1}
+          max={200}
+          value={limitGb ?? ""}
+          onChange={(e) => {
+            const gb = Number(e.target.value);
+            setLimitGb(Number.isFinite(gb) ? Math.round(gb) : null);
+          }}
+          placeholder="50"
+          className="mt-1 w-full rounded-md border border-gray-200 bg-gray-50 px-2 py-1 text-sm dark:border-gray-700 dark:bg-gray-900"
+        />
+      </label>
+      {stats && (
+        <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          已用 {formatFileSize(stats.totalBytes)} / 上限{" "}
+          {formatFileSize(stats.limitBytes)}
+          <span className="mx-1">·</span>
+          缩略图 {formatFileSize(stats.thumbBytes)}
+          <span className="mx-1">·</span>
+          原图 {formatFileSize(stats.fullBytes)}
+        </div>
+      )}
+      <div className="mt-3 flex items-center gap-2">
+        <Button
+          variant="secondary"
+          onClick={() => void handleSave()}
+          disabled={saving || limitGb === null}
+          className="px-3 py-1"
+        >
+          {saving ? "保存中..." : "保存"}
+        </Button>
+        {confirmingClear ? (
+          <>
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              确认清空缓存？
+            </span>
+            <Button
+              variant="secondary"
+              onClick={() => void handleClear()}
+              disabled={clearing}
+              className="px-3 py-1"
+            >
+              {clearing ? "清空中..." : "确认清空"}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setConfirmingClear(false)}
+              disabled={clearing}
+              className="px-3 py-1"
+            >
+              取消
+            </Button>
+          </>
+        ) : (
+          <Button
+            variant="secondary"
+            onClick={() => setConfirmingClear(true)}
+            className="px-3 py-1"
+          >
+            清空缓存
+          </Button>
+        )}
       </div>
     </section>
   );
@@ -459,12 +605,13 @@ function CmuxSection() {
   );
 }
 
-type SettingsTab = "appearance" | "update" | "proxy" | "cmux" | "logging";
+type SettingsTab = "appearance" | "update" | "proxy" | "cache" | "cmux" | "logging";
 
 const TAB_OPTIONS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "外观" },
   { id: "update", label: "应用更新" },
   { id: "proxy", label: "网络代理" },
+  { id: "cache", label: "应用缓存" },
   { id: "cmux", label: "cmux" },
   { id: "logging", label: "日志" },
 ];
@@ -543,6 +690,7 @@ export default function Settings() {
       {tab === "appearance" && <ThemeSection />}
       {tab === "update" && <UpdateSection />}
       {tab === "proxy" && <ProxySection />}
+      {tab === "cache" && <CacheSection />}
       {tab === "cmux" && <CmuxSection />}
       {tab === "logging" && <LogSection />}
     </ToolPage>

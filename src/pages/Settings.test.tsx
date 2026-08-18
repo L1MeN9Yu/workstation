@@ -26,6 +26,18 @@ vi.mock("../lib/proxy", () => ({
   saveGlobalProxy: vi.fn(async () => undefined),
 }));
 
+vi.mock("../lib/cacheSettings", () => ({
+  getCacheSettings: vi.fn(async () => 50 * 1024 * 1024 * 1024),
+  getCacheStats: vi.fn(async () => ({
+    totalBytes: 100 * 1024 * 1024,
+    thumbBytes: 40 * 1024 * 1024,
+    fullBytes: 60 * 1024 * 1024,
+    limitBytes: 50 * 1024 * 1024 * 1024,
+  })),
+  saveCacheSettings: vi.fn(async () => undefined),
+  clearCache: vi.fn(async () => undefined),
+}));
+
 vi.mock("../lib/confirm", () => ({
   confirmDialog: vi.fn(async () => true),
 }));
@@ -839,6 +851,110 @@ describe("Settings cmux section", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(container.textContent).not.toContain("cmux 可用");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+});
+
+describe("Settings cache section", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("loads and displays cache limit and usage stats", async () => {
+    const root = await renderPage(container, "应用缓存");
+    expect(container.textContent).toContain("应用缓存");
+    const input = container.querySelector("input") as HTMLInputElement;
+    expect(input.value).toBe("50");
+    expect(container.textContent).toContain("已用 100.0 MB / 上限 50.0 GB");
+    expect(container.textContent).toContain("缩略图 40.0 MB");
+    expect(container.textContent).toContain("原图 60.0 MB");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("saves the adjusted cache limit and refreshes stats", async () => {
+    const cacheModule = await import("../lib/cacheSettings");
+    const root = await renderPage(container, "应用缓存");
+    const input = container.querySelector("input") as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(input, "80");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickButton(container, "保存");
+    expect(cacheModule.saveCacheSettings).toHaveBeenCalledWith(
+      80 * 1024 * 1024 * 1024,
+    );
+    expect(toast.success).toHaveBeenCalledWith("缓存容量已保存");
+    expect(cacheModule.getCacheStats).toHaveBeenCalled();
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows a toast when saving the cache limit fails", async () => {
+    const cacheModule = await import("../lib/cacheSettings");
+    vi.mocked(cacheModule.saveCacheSettings).mockRejectedValue(
+      new Error("写入失败"),
+    );
+    const root = await renderPage(container, "应用缓存");
+    await clickButton(container, "保存");
+    expect(toast.error).toHaveBeenCalledWith("保存缓存容量失败：Error: 写入失败");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("clears cache after confirmation and refreshes stats", async () => {
+    const cacheModule = await import("../lib/cacheSettings");
+    const root = await renderPage(container, "应用缓存");
+    await clickButton(container, "清空缓存");
+    expect(container.textContent).toContain("确认清空缓存？");
+    await clickButton(container, "确认清空");
+    expect(cacheModule.clearCache).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith("缓存已清空");
+    expect(cacheModule.getCacheStats).toHaveBeenCalled();
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("cancels cache clearing without clearing", async () => {
+    const cacheModule = await import("../lib/cacheSettings");
+    const root = await renderPage(container, "应用缓存");
+    await clickButton(container, "清空缓存");
+    await clickButton(container, "取消");
+    expect(cacheModule.clearCache).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("确认清空缓存？");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows a toast when clearing cache fails", async () => {
+    const cacheModule = await import("../lib/cacheSettings");
+    vi.mocked(cacheModule.clearCache).mockRejectedValue(
+      new Error("清空失败"),
+    );
+    const root = await renderPage(container, "应用缓存");
+    await clickButton(container, "清空缓存");
+    await clickButton(container, "确认清空");
+    expect(toast.error).toHaveBeenCalledWith("清空缓存失败：Error: 清空失败");
     await act(async () => {
       root.unmount();
     });
