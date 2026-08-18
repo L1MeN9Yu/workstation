@@ -39,6 +39,15 @@ import {
   getSourceMeta,
 } from "../../lib/wallpaperSources";
 import { describeSearchError } from "../../lib/wallpaperErrors";
+import {
+  HISTORY_PAGE_SIZE,
+  addWallpaperHistory,
+  clearWallpaperHistory,
+  deleteWallpaperHistory,
+  listWallpaperHistory,
+  type WallpaperHistoryItem,
+} from "../../lib/wallpaperHistory";
+import { confirmDialog } from "../../lib/confirm";
 
 interface SearchError {
   source: string;
@@ -291,6 +300,10 @@ export default function WallpaperTool() {
   const [iterm2Profiles, setIterm2Profiles] = useState<string[]>([]);
   const [checkboxBlocked, setCheckboxBlocked] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  /** 当前图源搜索历史分页状态（8 条/页，切换图源时重置） */
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyItems, setHistoryItems] = useState<WallpaperHistoryItem[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
   const pageRef = useRef(1);
   const saveTimerRef = useRef<number | null>(null);
   /** 当前视图：search（搜索）或 library（本地壁纸库） */
@@ -581,7 +594,36 @@ export default function WallpaperTool() {
 
   const meta = useMemo(() => getSourceMeta(source), [source]);
 
-  async function runSearch(random: boolean, page: number): Promise<void> {
+  /** 拉取指定图源某页搜索历史；失败 toast 提示但不阻塞搜索主流程 */
+  const loadHistory = useCallback(
+    async (sourceId: string, page: number): Promise<void> => {
+      try {
+        const result = await listWallpaperHistory(
+          sourceId,
+          page,
+          HISTORY_PAGE_SIZE,
+        );
+        setHistoryItems(result.items);
+        setHistoryTotal(result.total);
+        setHistoryPage(result.page);
+      } catch (e) {
+        toast.error(`加载搜索历史失败：${String(e)}`);
+      }
+    },
+    [],
+  );
+
+  /** 挂载时拉取初始图源第 1 页历史（切换图源由 tab handler 重置并重新拉取） */
+  const initialSourceRef = useRef(source);
+  useEffect(() => {
+    void loadHistory(initialSourceRef.current, 1);
+  }, [loadHistory]);
+
+  async function runSearch(
+    random: boolean,
+    page: number,
+    keywordOverride?: string,
+  ): Promise<void> {
     if (!settings) return;
     setSearching(true);
     setErrors([]);
@@ -589,7 +631,7 @@ export default function WallpaperTool() {
       const result = await searchWallpapers(
         {
           source,
-          keywords: random ? "" : keywords,
+          keywords: random ? "" : (keywordOverride ?? keywords),
           random,
           page,
         },
@@ -611,10 +653,23 @@ export default function WallpaperTool() {
     }
   }
 
-  async function handleSearch(random: boolean) {
+  async function handleSearch(random: boolean, keywordOverride?: string) {
     pageRef.current = 1;
     setItems([]);
-    await runSearch(random, 1);
+    if (!random) {
+      const trimmed = (keywordOverride ?? keywords).trim();
+      if (trimmed !== "") {
+        // 发起即记（随机除外）：不阻塞搜索，失败静默；成功后刷新当前页让新词置顶可见
+        addWallpaperHistory(source, trimmed)
+          .then(() => {
+            void loadHistory(source, historyPage);
+          })
+          .catch(() => {
+            // 历史记录失败不影响搜索主流程
+          });
+      }
+    }
+    await runSearch(random, 1, keywordOverride);
   }
 
   async function handleLoadMore() {
@@ -622,6 +677,36 @@ export default function WallpaperTool() {
     pageRef.current = next;
     await runSearch(false, next);
   }
+
+  /** 删除单条历史后刷新当前页 */
+  async function handleDeleteHistory(item: WallpaperHistoryItem): Promise<void> {
+    try {
+      await deleteWallpaperHistory(source, item.keyword);
+      void loadHistory(source, historyPage);
+    } catch (e) {
+      toast.error(`删除搜索历史失败：${String(e)}`);
+    }
+  }
+
+  /** 清空当前图源全部历史（二次确认），完成后回到第 1 页 */
+  async function handleClearHistory(): Promise<void> {
+    const label = meta?.label ?? source;
+    const ok = await confirmDialog(
+      `确认清空「${label}」的全部搜索历史？此操作不可恢复。`,
+    );
+    if (!ok) return;
+    try {
+      await clearWallpaperHistory(source);
+      setHistoryPage(1);
+      void loadHistory(source, 1);
+      toast.success("搜索历史已清空");
+    } catch (e) {
+      toast.error(`清空搜索历史失败：${String(e)}`);
+    }
+  }
+
+  /** 历史区块总页数（至少 1 页） */
+  const totalPages = Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
 
   async function handleApply(item: WallpaperItem) {
     if (applyTarget === "iterm2" && !settings?.iterm2Profile) {
@@ -788,6 +873,8 @@ export default function WallpaperTool() {
                 setItems([]);
                 setHasMore(false);
                 pageRef.current = 1;
+                setHistoryPage(1);
+                void loadHistory(s.id, 1);
               }}
               className={`rounded-md px-3 py-1 text-sm ${
                 source === s.id
@@ -1078,6 +1165,82 @@ export default function WallpaperTool() {
           </button>
         )}
       </div>
+
+      {historyItems.length > 0 && (
+        <div className="mb-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-sm font-medium">
+              {meta?.label ?? source} 搜索历史
+            </span>
+            <button
+              onClick={() => void handleClearHistory()}
+              className="rounded-md bg-gray-200 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+              type="button"
+            >
+              清空
+            </button>
+          </div>
+          <ul className="space-y-1">
+            {historyItems.map((item) => (
+              <li
+                key={item.keyword}
+                className="group flex items-center justify-between gap-2"
+              >
+                <button
+                  onClick={() => {
+                    setKeywords(item.keyword);
+                    void handleSearch(false, item.keyword);
+                  }}
+                  title={`搜索「${item.keyword}」`}
+                  className="truncate rounded px-1 py-0.5 text-left text-sm text-accent-600 hover:bg-gray-100 hover:text-accent-800 dark:text-accent-400 dark:hover:bg-gray-800 dark:hover:text-accent-300"
+                  type="button"
+                >
+                  {item.keyword}
+                </button>
+                <button
+                  onClick={() => void handleDeleteHistory(item)}
+                  aria-label={`删除 ${item.keyword}`}
+                  className="shrink-0 rounded px-1 py-0.5 text-xs text-gray-400 opacity-0 hover:bg-red-100 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-900/40 dark:hover:text-red-400"
+                  type="button"
+                >
+                  删除
+                </button>
+              </li>
+            ))}
+          </ul>
+          {historyTotal > HISTORY_PAGE_SIZE && (
+            <div className="mt-2 flex items-center justify-center gap-2 text-xs">
+              <button
+                onClick={() => {
+                  const next = historyPage - 1;
+                  setHistoryPage(next);
+                  void loadHistory(source, next);
+                }}
+                disabled={historyPage <= 1}
+                className="rounded-md bg-gray-200 px-2 py-0.5 text-gray-700 disabled:opacity-40 dark:bg-gray-700 dark:text-gray-200"
+                type="button"
+              >
+                上一页
+              </button>
+              <span className="text-gray-500">
+                第 {historyPage} / {totalPages} 页
+              </span>
+              <button
+                onClick={() => {
+                  const next = historyPage + 1;
+                  setHistoryPage(next);
+                  void loadHistory(source, next);
+                }}
+                disabled={historyPage >= totalPages}
+                className="rounded-md bg-gray-200 px-2 py-0.5 text-gray-700 disabled:opacity-40 dark:bg-gray-700 dark:text-gray-200"
+                type="button"
+              >
+                下一页
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {errors.length > 0 && (
         <div className="mb-3 space-y-2">

@@ -16,6 +16,13 @@ import {
 } from "../../lib/wallpaper";
 import { listIterm2Profiles } from "../../lib/iterm2Config";
 import { toast } from "../../lib/toast";
+import {
+  addWallpaperHistory,
+  clearWallpaperHistory,
+  deleteWallpaperHistory,
+  listWallpaperHistory,
+} from "../../lib/wallpaperHistory";
+import { confirmDialog } from "../../lib/confirm";
 
 const { readyCallbackRef } = vi.hoisted(() => ({
   readyCallbackRef: { current: () => {} },
@@ -30,6 +37,18 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("../../lib/toast", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
+}));
+
+vi.mock("../../lib/confirm", () => ({
+  confirmDialog: vi.fn(),
+}));
+
+vi.mock("../../lib/wallpaperHistory", () => ({
+  HISTORY_PAGE_SIZE: 8,
+  listWallpaperHistory: vi.fn(),
+  addWallpaperHistory: vi.fn(),
+  deleteWallpaperHistory: vi.fn(),
+  clearWallpaperHistory: vi.fn(),
 }));
 
 vi.mock("../../lib/iterm2Config", () => ({
@@ -161,6 +180,16 @@ describe("WallpaperTool", () => {
     });
     vi.mocked(searchWallpapers).mockResolvedValue([]);
     vi.mocked(hasWallpaperFullCache).mockResolvedValue(false);
+    vi.mocked(listWallpaperHistory).mockResolvedValue({
+      total: 0,
+      page: 1,
+      pageSize: 8,
+      items: [],
+    });
+    vi.mocked(addWallpaperHistory).mockResolvedValue(undefined);
+    vi.mocked(deleteWallpaperHistory).mockResolvedValue(undefined);
+    vi.mocked(clearWallpaperHistory).mockResolvedValue(undefined);
+    vi.mocked(confirmDialog).mockResolvedValue(true);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = setup(container);
@@ -1947,6 +1976,344 @@ describe("WallpaperTool", () => {
         dialogButton(dialog, "复位到 100%").click();
       });
       expect(img.style.transform).toContain("translate3d(0px, 0px, 0) scale(1)");
+    });
+  });
+
+  describe("搜索历史区块", () => {
+    /** 按精确文本找按钮 */
+    function findButton(text: string): HTMLButtonElement | undefined {
+      return Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === text,
+      );
+    }
+
+    /** 重新挂载组件：让挂载时的历史拉取使用当前设置的 mock */
+    async function remount(): Promise<void> {
+      act(() => {
+        root.unmount();
+      });
+      root = setup(container);
+      await flush();
+    }
+
+    /** 通过原生 setter 修改受控搜索框并派发 input */
+    function setSearchInput(value: string): void {
+      const input = Array.from(container.querySelectorAll("input")).find(
+        (i) => i.placeholder.includes("关键词"),
+      )!;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    /** 历史条目按钮（按 title 定位） */
+    function historyButton(keyword: string): HTMLButtonElement | undefined {
+      return Array.from(container.querySelectorAll("button")).find(
+        (b) => b.title === `搜索「${keyword}」`,
+      );
+    }
+
+    it("空历史时不渲染历史区块，挂载时拉取初始图源第 1 页", async () => {
+      await flush();
+      expect(listWallpaperHistory).toHaveBeenCalledWith("wallhaven", 1, 8);
+      expect(container.textContent).not.toContain("搜索历史");
+      expect(historyButton("anime")).toBeUndefined();
+    });
+
+    it("有历史时渲染历史区块与关键词，未超一页时不显示分页按钮", async () => {
+      vi.mocked(listWallpaperHistory).mockResolvedValue({
+        total: 2,
+        page: 1,
+        pageSize: 8,
+        items: [
+          { source: "wallhaven", keyword: "anime", updatedAt: 2 },
+          { source: "wallhaven", keyword: "landscape", updatedAt: 1 },
+        ],
+      });
+      await remount();
+      expect(container.textContent).toContain("wallhaven 搜索历史");
+      expect(historyButton("anime")).toBeDefined();
+      expect(historyButton("landscape")).toBeDefined();
+      expect(findButton("上一页")).toBeUndefined();
+      expect(findButton("下一页")).toBeUndefined();
+    });
+
+    it("超过一页时显示分页按钮，翻页拉取新页并切换可用态", async () => {
+      const page1Items = Array.from({ length: 8 }, (_, i) => ({
+        source: "wallhaven",
+        keyword: `kw${i}`,
+        updatedAt: 100 - i,
+      }));
+      const page2Items = Array.from({ length: 2 }, (_, i) => ({
+        source: "wallhaven",
+        keyword: `kw2-${i}`,
+        updatedAt: 50 - i,
+      }));
+      vi.mocked(listWallpaperHistory).mockImplementation(
+        async (_source: string, page: number) => {
+          if (page >= 2) {
+            return { total: 10, page: 2, pageSize: 8, items: page2Items };
+          }
+          return { total: 10, page: 1, pageSize: 8, items: page1Items };
+        },
+      );
+      await remount();
+      let prevBtn = findButton("上一页")!;
+      let nextBtn = findButton("下一页")!;
+      expect(prevBtn.disabled).toBe(true);
+      expect(nextBtn.disabled).toBe(false);
+      await act(async () => {
+        nextBtn.click();
+      });
+      await flush();
+      expect(listWallpaperHistory).toHaveBeenLastCalledWith("wallhaven", 2, 8);
+      expect(container.textContent).toContain("kw2-0");
+      expect(container.textContent).not.toContain("kw0");
+      prevBtn = findButton("上一页")!;
+      nextBtn = findButton("下一页")!;
+      expect(prevBtn.disabled).toBe(false);
+      expect(nextBtn.disabled).toBe(true);
+      await act(async () => {
+        prevBtn.click();
+      });
+      await flush();
+      expect(listWallpaperHistory).toHaveBeenLastCalledWith("wallhaven", 1, 8);
+      expect(container.textContent).toContain("kw0");
+    });
+
+    it("点击历史条目填入搜索框并立即回搜", async () => {
+      vi.mocked(listWallpaperHistory).mockResolvedValue({
+        total: 1,
+        page: 1,
+        pageSize: 8,
+        items: [{ source: "wallhaven", keyword: "anime", updatedAt: 1 }],
+      });
+      await remount();
+      await act(async () => {
+        historyButton("anime")!.click();
+      });
+      await flush();
+      expect(searchWallpapers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ keywords: "anime", random: false, page: 1 }),
+        expect.anything(),
+      );
+      const input = Array.from(container.querySelectorAll("input")).find(
+        (i) => i.placeholder.includes("关键词"),
+      )! as HTMLInputElement;
+      expect(input.value).toBe("anime");
+    });
+
+    it("非随机搜索发起时记录历史并刷新当前页", async () => {
+      await flush();
+      act(() => {
+        setSearchInput("anime");
+      });
+      await act(async () => {
+        findButton("搜索")!.click();
+      });
+      await flush();
+      expect(addWallpaperHistory).toHaveBeenCalledWith("wallhaven", "anime");
+      expect(listWallpaperHistory).toHaveBeenLastCalledWith("wallhaven", 1, 8);
+    });
+
+    it("空白关键词搜索不记录历史", async () => {
+      await flush();
+      act(() => {
+        setSearchInput("   ");
+      });
+      await act(async () => {
+        findButton("搜索")!.click();
+      });
+      await flush();
+      expect(addWallpaperHistory).not.toHaveBeenCalled();
+      expect(searchWallpapers).toHaveBeenCalled();
+    });
+
+    it("随机搜索不记录历史", async () => {
+      await flush();
+      act(() => {
+        setSearchInput("anime");
+      });
+      await act(async () => {
+        findButton("随机")!.click();
+      });
+      await flush();
+      expect(addWallpaperHistory).not.toHaveBeenCalled();
+    });
+
+    it("历史记录失败时静默，不影响搜索主流程", async () => {
+      vi.mocked(addWallpaperHistory).mockRejectedValue(new Error("boom"));
+      await flush();
+      act(() => {
+        setSearchInput("anime");
+      });
+      await act(async () => {
+        findButton("搜索")!.click();
+      });
+      await flush();
+      expect(searchWallpapers).toHaveBeenCalledWith(
+        expect.objectContaining({ keywords: "anime" }),
+        expect.anything(),
+      );
+    });
+
+    it("切换图源重置历史分页并拉取新源第 1 页", async () => {
+      vi.mocked(listWallpaperHistory).mockImplementation(
+        async (sourceId: string, page: number) => {
+          if (sourceId === "danbooru") {
+            return {
+              total: 1,
+              page: 1,
+              pageSize: 8,
+              items: [{ source: "danbooru", keyword: "scenery", updatedAt: 1 }],
+            };
+          }
+          if (page >= 2) {
+            return {
+              total: 10,
+              page: 2,
+              pageSize: 8,
+              items: [{ source: "wallhaven", keyword: "kw-page2", updatedAt: 1 }],
+            };
+          }
+          return {
+            total: 10,
+            page: 1,
+            pageSize: 8,
+            items: Array.from({ length: 8 }, (_, i) => ({
+              source: "wallhaven",
+              keyword: `kw${i}`,
+              updatedAt: 100 - i,
+            })),
+          };
+        },
+      );
+      await remount();
+      await act(async () => {
+        findButton("下一页")!.click();
+      });
+      await flush();
+      expect(listWallpaperHistory).toHaveBeenLastCalledWith("wallhaven", 2, 8);
+      await act(async () => {
+        findButton("Danbooru")!.click();
+      });
+      await flush();
+      expect(listWallpaperHistory).toHaveBeenLastCalledWith("danbooru", 1, 8);
+      expect(container.textContent).toContain("Danbooru 搜索历史");
+      expect(container.textContent).toContain("scenery");
+      expect(container.textContent).not.toContain("kw-page2");
+    });
+
+    it("删除单条历史后调用后端并重新拉取当前页", async () => {
+      vi.mocked(listWallpaperHistory).mockResolvedValue({
+        total: 2,
+        page: 1,
+        pageSize: 8,
+        items: [
+          { source: "wallhaven", keyword: "anime", updatedAt: 2 },
+          { source: "wallhaven", keyword: "landscape", updatedAt: 1 },
+        ],
+      });
+      await remount();
+      const deleteBtn = container.querySelector(
+        'button[aria-label="删除 anime"]',
+      ) as HTMLButtonElement;
+      expect(deleteBtn).not.toBeNull();
+      await act(async () => {
+        deleteBtn.click();
+      });
+      await flush();
+      expect(deleteWallpaperHistory).toHaveBeenCalledWith(
+        "wallhaven",
+        "anime",
+      );
+      expect(listWallpaperHistory).toHaveBeenLastCalledWith("wallhaven", 1, 8);
+    });
+
+    it("删除历史失败时 toast 提示", async () => {
+      vi.mocked(listWallpaperHistory).mockResolvedValue({
+        total: 1,
+        page: 1,
+        pageSize: 8,
+        items: [{ source: "wallhaven", keyword: "anime", updatedAt: 1 }],
+      });
+      vi.mocked(deleteWallpaperHistory).mockRejectedValue(new Error("db"));
+      await remount();
+      await act(async () => {
+        (container.querySelector('button[aria-label="删除 anime"]') as HTMLButtonElement).click();
+      });
+      await flush();
+      expect(toast.error).toHaveBeenCalledWith(
+        "删除搜索历史失败：Error: db",
+      );
+    });
+
+    it("清空当前站点历史需确认，确认后清空并回到空态", async () => {
+      let cleared = false;
+      vi.mocked(listWallpaperHistory).mockImplementation(async () => {
+        if (cleared) {
+          return { total: 0, page: 1, pageSize: 8, items: [] };
+        }
+        return {
+          total: 2,
+          page: 1,
+          pageSize: 8,
+          items: [
+            { source: "wallhaven", keyword: "anime", updatedAt: 2 },
+            { source: "wallhaven", keyword: "landscape", updatedAt: 1 },
+          ],
+        };
+      });
+      vi.mocked(clearWallpaperHistory).mockImplementation(async () => {
+        cleared = true;
+      });
+      await remount();
+      expect(container.textContent).toContain("wallhaven 搜索历史");
+      await act(async () => {
+        findButton("清空")!.click();
+      });
+      await flush();
+      expect(confirmDialog).toHaveBeenCalledWith(
+        expect.stringContaining("wallhaven"),
+      );
+      expect(clearWallpaperHistory).toHaveBeenCalledWith("wallhaven");
+      expect(toast.success).toHaveBeenCalledWith("搜索历史已清空");
+      expect(container.textContent).not.toContain("搜索历史");
+    });
+
+    it("取消确认时不执行清空", async () => {
+      vi.mocked(listWallpaperHistory).mockResolvedValue({
+        total: 1,
+        page: 1,
+        pageSize: 8,
+        items: [{ source: "wallhaven", keyword: "anime", updatedAt: 1 }],
+      });
+      vi.mocked(confirmDialog).mockResolvedValue(false);
+      await remount();
+      await act(async () => {
+        findButton("清空")!.click();
+      });
+      await flush();
+      expect(clearWallpaperHistory).not.toHaveBeenCalled();
+      expect(historyButton("anime")).toBeDefined();
+    });
+
+    it("历史加载失败时 toast 提示且不阻塞搜索", async () => {
+      vi.mocked(listWallpaperHistory).mockRejectedValue(
+        new Error("db locked"),
+      );
+      await remount();
+      expect(toast.error).toHaveBeenCalledWith(
+        "加载搜索历史失败：Error: db locked",
+      );
+      await act(async () => {
+        findButton("搜索")!.click();
+      });
+      await flush();
+      expect(searchWallpapers).toHaveBeenCalled();
     });
   });
 

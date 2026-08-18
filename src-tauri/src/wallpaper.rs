@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures_util::{StreamExt, TryStreamExt};
 use image::GenericImageView;
 use reqwest::Client;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Deserializer, Serialize};
 
 const USER_AGENT: &str = "workstation-wallpaper/0.1";
@@ -942,6 +943,120 @@ pub fn clear_wallpaper_cache(pool: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 搜索历史分页默认每页条数。
+const HISTORY_DEFAULT_PAGE_SIZE: i64 = 8;
+
+/// 一条搜索历史（camelCase 序列化供前端展示）。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperHistoryItem {
+    pub source: String,
+    pub keyword: String,
+    pub updated_at: i64,
+}
+
+/// 搜索历史分页结果（camelCase 序列化供前端展示）。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperHistoryPage {
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub items: Vec<WallpaperHistoryItem>,
+}
+
+/// 分页列出某图源的搜索历史：`COUNT(*)` 总数 + `LIMIT/OFFSET` 查询，按最近使用倒序。
+/// `page` 从 1 起（小于 1 按 1 处理）；`page_size` 小于等于 0 时使用默认 8。
+pub fn list_wallpaper_history_at(
+    conn: &Connection,
+    source: &str,
+    page: i64,
+    page_size: i64,
+) -> Result<WallpaperHistoryPage, String> {
+    let page = page.max(1);
+    let page_size = if page_size > 0 {
+        page_size
+    } else {
+        HISTORY_DEFAULT_PAGE_SIZE
+    };
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM wallpaper_search_history WHERE source = ?1",
+            [source],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("cannot count wallpaper history: {e}"))?;
+    let offset = (page - 1) * page_size;
+    let mut stmt = conn
+        .prepare(
+            "SELECT source, keyword, updated_at FROM wallpaper_search_history \
+             WHERE source = ?1 ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3",
+        )
+        .map_err(|e| format!("cannot prepare history query: {e}"))?;
+    let items = stmt
+        .query_map(params![source, page_size, offset], |row| {
+            Ok(WallpaperHistoryItem {
+                source: row.get(0)?,
+                keyword: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("cannot query wallpaper history: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot read wallpaper history: {e}"))?;
+    Ok(WallpaperHistoryPage {
+        total,
+        page,
+        page_size,
+        items,
+    })
+}
+
+/// 记录一次搜索历史：关键词去首尾空白后写入；已存在则更新时间戳置顶，
+/// 不存在则新增（联合主键去重）。空白关键词静默忽略，不落库。
+pub fn add_wallpaper_history_at(
+    conn: &Connection,
+    source: &str,
+    keyword: &str,
+) -> Result<(), String> {
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO wallpaper_search_history (source, keyword, updated_at) \
+         VALUES (?1, ?2, ?3) \
+         ON CONFLICT(source, keyword) DO UPDATE SET updated_at = excluded.updated_at",
+        params![source, keyword, chrono::Utc::now().timestamp()],
+    )
+    .map_err(|e| format!("cannot insert wallpaper history: {e}"))?;
+    Ok(())
+}
+
+/// 删除单条搜索历史；记录不存在时静默成功。
+pub fn delete_wallpaper_history_at(
+    conn: &Connection,
+    source: &str,
+    keyword: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM wallpaper_search_history WHERE source = ?1 AND keyword = ?2",
+        params![source, keyword],
+    )
+    .map_err(|e| format!("cannot delete wallpaper history: {e}"))?;
+    Ok(())
+}
+
+/// 清空某图源的全部搜索历史（不影响其他图源）。
+pub fn clear_wallpaper_history_at(conn: &Connection, source: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM wallpaper_search_history WHERE source = ?1",
+        [source],
+    )
+    .map_err(|e| format!("cannot clear wallpaper history: {e}"))?;
+    Ok(())
+}
+
 fn load_thumb_index(dir: &Path) -> ThumbIndex {
     let path = dir.join(CACHE_META_FILE);
     match fs::read_to_string(&path)
@@ -1246,6 +1361,152 @@ mod tests {
             cache_limit_bytes: None,
             cache_root: None,
             base_urls: HashMap::new(),
+        }
+    }
+
+    /// 在临时目录创建已完成迁移的数据库连接。
+    fn history_test_conn(name: &str) -> Connection {
+        let dir = std::env::temp_dir().join(format!(
+            "workstation-wall-history-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::db::open_db(&dir.join("history.db")).unwrap()
+    }
+
+    #[test]
+    fn add_history_then_list_returns_newest_first() {
+        let conn = history_test_conn("newest-first");
+        add_wallpaper_history_at(&conn, "wallhaven", "anime").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        add_wallpaper_history_at(&conn, "wallhaven", "scenery").unwrap();
+        let page = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.page, 1);
+        assert_eq!(page.page_size, 8);
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].keyword, "scenery");
+        assert_eq!(page.items[0].source, "wallhaven");
+        assert!(page.items[0].updated_at > 0);
+        assert_eq!(page.items[1].keyword, "anime");
+    }
+
+    #[test]
+    fn add_duplicate_history_upserts_without_dup_and_boosts() {
+        let conn = history_test_conn("upsert");
+        add_wallpaper_history_at(&conn, "wallhaven", "anime").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        add_wallpaper_history_at(&conn, "wallhaven", "scenery").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        add_wallpaper_history_at(&conn, "wallhaven", "anime").unwrap();
+        let page = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].keyword, "anime");
+        assert_eq!(page.items[1].keyword, "scenery");
+    }
+
+    #[test]
+    fn add_blank_or_whitespace_keyword_is_ignored() {
+        let conn = history_test_conn("blank");
+        add_wallpaper_history_at(&conn, "wallhaven", "").unwrap();
+        add_wallpaper_history_at(&conn, "wallhaven", "   ").unwrap();
+        add_wallpaper_history_at(&conn, "wallhaven", "  anime  ").unwrap();
+        let page = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].keyword, "anime");
+    }
+
+    #[test]
+    fn list_history_empty_source_returns_zero_total() {
+        let conn = history_test_conn("empty");
+        let page = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
+    }
+
+    #[test]
+    fn list_history_pagination_covers_pages_and_out_of_range() {
+        let conn = history_test_conn("pagination");
+        for i in 1..=10 {
+            add_wallpaper_history_at(&conn, "wallhaven", &format!("k{i}")).unwrap();
+        }
+        let page1 = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(page1.total, 10);
+        assert_eq!(page1.items.len(), 8);
+        let page2 = list_wallpaper_history_at(&conn, "wallhaven", 2, 8).unwrap();
+        assert_eq!(page2.items.len(), 2);
+        let page3 = list_wallpaper_history_at(&conn, "wallhaven", 3, 8).unwrap();
+        assert_eq!(page3.items.len(), 0);
+        assert_eq!(page3.total, 10);
+        let far = list_wallpaper_history_at(&conn, "wallhaven", 99, 8).unwrap();
+        assert!(far.items.is_empty());
+        assert_eq!(far.total, 10);
+    }
+
+    #[test]
+    fn list_history_normalizes_page_and_page_size() {
+        let conn = history_test_conn("normalize");
+        for i in 1..=3 {
+            add_wallpaper_history_at(&conn, "danbooru", &format!("t{i}")).unwrap();
+        }
+        let zero_page = list_wallpaper_history_at(&conn, "danbooru", 0, 8).unwrap();
+        assert_eq!(zero_page.page, 1);
+        assert_eq!(zero_page.items.len(), 3);
+        let zero_size = list_wallpaper_history_at(&conn, "danbooru", 1, 0).unwrap();
+        assert_eq!(zero_size.page_size, 8);
+        let negative_size = list_wallpaper_history_at(&conn, "danbooru", 1, -5).unwrap();
+        assert_eq!(negative_size.page_size, 8);
+        let small_size = list_wallpaper_history_at(&conn, "danbooru", 1, 1).unwrap();
+        assert_eq!(small_size.page_size, 1);
+        assert_eq!(small_size.items.len(), 1);
+        assert_eq!(small_size.total, 3);
+    }
+
+    #[test]
+    fn delete_history_removes_single_row() {
+        let conn = history_test_conn("delete");
+        add_wallpaper_history_at(&conn, "wallhaven", "anime").unwrap();
+        add_wallpaper_history_at(&conn, "wallhaven", "scenery").unwrap();
+        delete_wallpaper_history_at(&conn, "wallhaven", "anime").unwrap();
+        let page = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].keyword, "scenery");
+    }
+
+    #[test]
+    fn delete_missing_history_is_silent() {
+        let conn = history_test_conn("delete-missing");
+        delete_wallpaper_history_at(&conn, "wallhaven", "nope").unwrap();
+        let page = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(page.total, 0);
+    }
+
+    #[test]
+    fn clear_history_affects_only_given_source() {
+        let conn = history_test_conn("clear");
+        add_wallpaper_history_at(&conn, "wallhaven", "anime").unwrap();
+        add_wallpaper_history_at(&conn, "wallhaven", "scenery").unwrap();
+        add_wallpaper_history_at(&conn, "danbooru", "kancolle").unwrap();
+        clear_wallpaper_history_at(&conn, "wallhaven").unwrap();
+        let wallhaven = list_wallpaper_history_at(&conn, "wallhaven", 1, 8).unwrap();
+        assert_eq!(wallhaven.total, 0);
+        assert!(wallhaven.items.is_empty());
+        let danbooru = list_wallpaper_history_at(&conn, "danbooru", 1, 8).unwrap();
+        assert_eq!(danbooru.total, 1);
+        assert_eq!(danbooru.items[0].keyword, "kancolle");
+    }
+
+    #[test]
+    fn history_sources_are_isolated() {
+        let conn = history_test_conn("isolated");
+        add_wallpaper_history_at(&conn, "wallhaven", "anime").unwrap();
+        add_wallpaper_history_at(&conn, "danbooru", "azur_lane").unwrap();
+        add_wallpaper_history_at(&conn, "safebooru", "flowers").unwrap();
+        for source in ["wallhaven", "danbooru", "safebooru"] {
+            let page = list_wallpaper_history_at(&conn, source, 1, 8).unwrap();
+            assert_eq!(page.total, 1);
+            assert_eq!(page.items[0].source, source);
         }
     }
 

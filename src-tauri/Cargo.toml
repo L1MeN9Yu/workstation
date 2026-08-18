@@ -1,6 +1,6 @@
 [package]
 name = "workstation"
-version = "0.1.0"
+version = "0.5.0"
 description = "A Tauri app to manage and optimize developer daily work"
 authors = ["L1MeN9Yu"]
 edition = "2021"
@@ -36,6 +36,7 @@ fontdb = "0.24.0"
 image = "0.25"
 tauri-plugin-dialog = "2"
 filetime = "0.2.29"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 
