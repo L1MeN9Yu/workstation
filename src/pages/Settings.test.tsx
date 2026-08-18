@@ -7,6 +7,10 @@ import { useUpdateStore } from "../store/update";
 import { useTheme } from "../store/theme";
 import { relaunch } from "../lib/updater";
 
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+
 vi.mock("../lib/updater", () => ({
   isTauriRuntime: vi.fn(() => true),
   currentAppVersion: vi.fn(async () => "0.1.0"),
@@ -602,6 +606,101 @@ describe("Settings network proxy section", () => {
     await clickButton(container, "保存");
     expect(toast.error).toHaveBeenCalledWith("Error: 代理地址无效");
     expect(container.textContent).not.toContain("代理地址无效");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+});
+
+describe("Settings logging section", () => {
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    vi.clearAllMocks();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("renders the logging section with open log dir button", async () => {
+    const root = await renderPage(container, "日志");
+    expect(container.textContent).toContain("应用日志");
+    const logsBtn = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "打开日志目录",
+    );
+    expect(logsBtn).toBeDefined();
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("opens the log directory and shows success toast on click", async () => {
+    const root = await renderPage(container, "日志");
+    await clickButton(container, "打开日志目录");
+    expect(invokeMock).toHaveBeenCalledWith("open_log_dir");
+    expect(toast.success).toHaveBeenCalledWith("已打开日志目录");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows an error toast when opening the log directory fails", async () => {
+    invokeMock.mockRejectedValue(new Error("log dir unavailable"));
+    const root = await renderPage(container, "日志");
+    await clickButton(container, "打开日志目录");
+    expect(toast.error).toHaveBeenCalledWith("Error: log dir unavailable");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("hides the logging section when switching to another tab", async () => {
+    const root = await renderPage(container, "日志");
+    expect(container.textContent).toContain("应用日志");
+    await clickButton(container, "外观");
+    expect(container.textContent).not.toContain("应用日志");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("displays the current log file path and keeps the open button usable", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "current_log_file"
+        ? Promise.resolve("/tmp/logs/workstation.log")
+        : Promise.resolve(undefined),
+    );
+    const root = await renderPage(container, "日志");
+    expect(container.textContent).toContain("当前进程写入日志文件");
+    expect(container.textContent).toContain("/tmp/logs/workstation.log");
+    expect(container.textContent).not.toContain("正在获取日志路径");
+    await clickButton(container, "打开日志目录");
+    expect(invokeMock).toHaveBeenCalledWith("open_log_dir");
+    expect(toast.success).toHaveBeenCalledWith("已打开日志目录");
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows an error when the current log file path cannot be resolved", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === "current_log_file"
+        ? Promise.reject(new Error("cannot resolve app log dir"))
+        : Promise.resolve(undefined),
+    );
+    const root = await renderPage(container, "日志");
+    expect(container.textContent).toContain("无法获取日志路径");
+    expect(container.textContent).toContain("cannot resolve app log dir");
+    const logsBtn = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "打开日志目录",
+    );
+    expect(logsBtn).toBeDefined();
     await act(async () => {
       root.unmount();
     });

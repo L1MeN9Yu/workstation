@@ -869,6 +869,7 @@ describe("WallpaperTool", () => {
     expect(container.textContent).not.toContain("代理地址");
     expect(container.textContent).toContain("下载目录");
     expect(container.textContent).not.toContain("Danbooru 参数");
+    expect(container.textContent).not.toContain("打开日志目录");
     const saveBtn = Array.from(container.querySelectorAll("button")).find(
       (b) => b.textContent === "保存设置",
     )!;

@@ -380,6 +380,11 @@ pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("cannot open log dir: {e}"))
 }
 
+#[tauri::command]
+pub fn current_log_file(app: AppHandle) -> Result<String, String> {
+    crate::logging::current_log_file_with(log_dir_path(&app)).map(|p| p.display().to_string())
+}
+
 fn log_dir_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_log_dir()
@@ -498,7 +503,8 @@ pub fn run() {
             wallpaper_thumb,
             read_local_wallpaper_file,
             delete_local_wallpapers,
-            open_log_dir
+            open_log_dir,
+            current_log_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -8,7 +8,6 @@ import {
 } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ToolPage } from "../ToolPage";
-import OpenLogDirButton from "../../components/OpenLogDirButton";
 import { WallpaperTargetSelect } from "../../components/WallpaperTargetSelect";
 import { toast } from "../../lib/toast";
 import EmptyState from "../../components/EmptyState";
@@ -972,10 +971,6 @@ export default function WallpaperTool() {
           >
             保存设置
           </button>
-          <div className="border-t border-gray-200 pt-3 text-sm font-medium dark:border-gray-700">
-            应用日志
-          </div>
-          <OpenLogDirButton />
         </div>
       )}
 
