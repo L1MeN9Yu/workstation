@@ -1972,12 +1972,12 @@ mod tests {
         let full_dir = pool_parent.join(FULL_SUBDIR);
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&full_dir).unwrap();
-        // 预置一个超大（sparse）旧 full 文件，超过默认 50GB 上限后最优先淘汰
+        // 预置一个超大（sparse）旧 full 文件，超过允许的最小上限（1GB）后最优先淘汰
         let old_full = full_image_cache_path(&pool_parent, "f0000000000000001", "jpg");
         {
             use std::io::Seek;
             let mut f = std::fs::File::create(&old_full).unwrap();
-            f.seek(std::io::SeekFrom::Start(DEFAULT_CACHE_LIMIT_BYTES + 1))
+            f.seek(std::io::SeekFrom::Start(MIN_CACHE_LIMIT_BYTES + 1))
                 .unwrap();
             f.write_all(&[0u8; 1]).unwrap();
         }
@@ -1987,7 +1987,7 @@ mod tests {
         let state = state_with(&dir, &url);
         let hash = thumb_hash(&url);
         let settings = WallpaperSettings {
-            cache_limit_bytes: Some(DEFAULT_CACHE_LIMIT_BYTES),
+            cache_limit_bytes: Some(MIN_CACHE_LIMIT_BYTES),
             ..empty_settings()
         };
         tauri::async_runtime::block_on(state.get_or_fetch(&hash, &settings)).unwrap();
