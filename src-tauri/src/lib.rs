@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod app_cache;
+pub mod db;
 pub mod fonts;
 pub mod ghosty_remote;
 pub mod iterm2;

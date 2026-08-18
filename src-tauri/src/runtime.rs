@@ -2,9 +2,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use rusqlite::Connection;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 
 use crate::{
     cmux_config_path, ghosty_config_path,
@@ -20,11 +22,39 @@ use crate::{
     read_ghosty_config_at, reload_cmux_config_impl,
     wallpaper::{
         self, DeleteWallpapersResult, LocalWallpaperInfo, SearchQuery, SourceSettings, ThumbState,
-        WallpaperItem, WallpaperSettings,
+        WallpaperHistoryPage, WallpaperItem, WallpaperSettings,
     },
     write_cmux_config_at, write_cmux_setting_impl, write_config as write_config_impl,
     write_ghosty_config_at, CmuxConfigFile, CmuxReloadStatus, DetectCmuxResult,
 };
+
+/// 数据库连接 state：进程级单连接（`Arc<Mutex<Option<Connection>>>` 保证 Send + Sync）。
+/// 启动打开失败时存 None，命令返回错误而非崩溃。
+pub struct DbState(pub Arc<Mutex<Option<Connection>>>);
+
+impl DbState {
+    /// 在阻塞线程内获取连接并执行 `op`；数据库不可用时返回错误。
+    async fn with_conn<T>(
+        &self,
+        op: impl FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let db = self.0.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let guard = db
+                .lock()
+                .map_err(|e| format!("database lock poisoned: {e}"))?;
+            let conn = guard
+                .as_ref()
+                .ok_or_else(|| "数据库不可用，请检查数据库文件".to_string())?;
+            op(conn)
+        })
+        .await
+        .map_err(|e| format!("database task failed: {e}"))?
+    }
+}
 
 #[tauri::command]
 pub fn read_config(key: String) -> Result<serde_json::Value, String> {
@@ -411,6 +441,54 @@ pub fn delete_local_wallpapers(paths: Vec<String>) -> DeleteWallpapersResult {
     wallpaper::delete_local_wallpapers_with(&paths, |p| fs::remove_file(p))
 }
 
+/// 分页列出某图源的搜索历史（每页默认 8 条，page 从 1 起）。
+#[tauri::command]
+pub async fn list_wallpaper_history(
+    source: String,
+    page: i64,
+    page_size: i64,
+    state: State<'_, DbState>,
+) -> Result<WallpaperHistoryPage, String> {
+    state
+        .with_conn(move |conn| wallpaper::list_wallpaper_history_at(conn, &source, page, page_size))
+        .await
+}
+
+/// 记录一次搜索历史：trim 后为空静默忽略，已存在则置顶。
+#[tauri::command]
+pub async fn add_wallpaper_history(
+    source: String,
+    keyword: String,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    state
+        .with_conn(move |conn| wallpaper::add_wallpaper_history_at(conn, &source, &keyword))
+        .await
+}
+
+/// 删除单条搜索历史（不存在静默成功）。
+#[tauri::command]
+pub async fn delete_wallpaper_history(
+    source: String,
+    keyword: String,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    state
+        .with_conn(move |conn| wallpaper::delete_wallpaper_history_at(conn, &source, &keyword))
+        .await
+}
+
+/// 清空某图源的全部搜索历史（不影响其他图源）。
+#[tauri::command]
+pub async fn clear_wallpaper_history(
+    source: String,
+    state: State<'_, DbState>,
+) -> Result<(), String> {
+    state
+        .with_conn(move |conn| wallpaper::clear_wallpaper_history_at(conn, &source))
+        .await
+}
+
 #[tauri::command]
 pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
     let dir = app
@@ -474,6 +552,15 @@ pub fn run() {
             fs::create_dir_all(cache_root.join("full"))
                 .map_err(|e| format!("cannot create full cache dir: {e}"))?;
             app.manage(ThumbState::new(cache_dir));
+            // 打开失败不阻塞启动：state 存 None，命令返回错误而非崩溃。
+            let db = match crate::db::db_path().and_then(|path| crate::db::open_db(&path)) {
+                Ok(conn) => DbState(Arc::new(Mutex::new(Some(conn)))),
+                Err(e) => {
+                    log::error!("wallpaper history database unavailable: {e}");
+                    DbState(Arc::new(Mutex::new(None)))
+                }
+            };
+            app.manage(db);
             Ok(())
         })
         .register_uri_scheme_protocol("thumb", |webview, request| {
@@ -547,6 +634,10 @@ pub fn run() {
             wallpaper_thumb,
             read_local_wallpaper_file,
             delete_local_wallpapers,
+            list_wallpaper_history,
+            add_wallpaper_history,
+            delete_wallpaper_history,
+            clear_wallpaper_history,
             open_log_dir,
             current_log_file
         ])
