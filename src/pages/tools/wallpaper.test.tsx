@@ -2013,6 +2013,40 @@ describe("WallpaperTool", () => {
         "data:image/jpeg;base64,RETRY",
       );
     });
+
+    it("缩略图预览下图片铺满舞台，且支持放大与复位", async () => {
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      const searchBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+      await act(async () => {
+        searchBtn.click();
+      });
+      await act(async () => {
+        getCard().click();
+      });
+      await flush();
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      // 未加载原图：展示缩略图且图片铺满舞台（object-contain 保持比例）
+      expect(previewWallpaper).not.toHaveBeenCalled();
+      const img = dialog.querySelector("img")!;
+      expect(img.getAttribute("src")).toBe(
+        `thumb://${PREVIEW_ITEM.thumb_hash}`,
+      );
+      expect(img.className).toContain("h-[85vh]");
+      expect(img.className).toContain("object-contain");
+      // 缩略图下可缩放：放大按钮生效
+      await act(async () => {
+        dialogButton(dialog, "放大").click();
+      });
+      expect(img.style.transform).toContain("scale(1.2)");
+      await act(async () => {
+        dialogButton(dialog, "复位到 100%").click();
+      });
+      expect(img.style.transform).toContain("translate3d(0px, 0px, 0) scale(1)");
+    });
   });
 
   describe("本地壁纸库视图", () => {

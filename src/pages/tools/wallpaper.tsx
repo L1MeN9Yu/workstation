@@ -531,10 +531,11 @@ export default function WallpaperTool() {
     };
   }, [previewItem, previewIndex, items.length, closePreview, goPrev, goNext]);
 
-  // 滚轮缩放（以光标为锚点），挂原生非被动监听以便 preventDefault
+  // 滚轮缩放（以光标为锚点），挂原生非被动监听以便 preventDefault；
+  // 缩略图与原图均可缩放（图片已铺满舞台，缩放对二者都有意义）
   useEffect(() => {
     const mask = lightboxRef.current;
-    if (!previewItem || !dataUrl || !mask) return;
+    if (!previewItem || !mask) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const img = imgRef.current;
@@ -549,7 +550,7 @@ export default function WallpaperTool() {
     return () => {
       mask.removeEventListener("wheel", onWheel);
     };
-  }, [previewItem, dataUrl, scale, offset, applyZoom]);
+  }, [previewItem, scale, offset, applyZoom]);
 
   useEffect(() => {
     return () => {
@@ -1337,9 +1338,10 @@ export default function WallpaperTool() {
             )}
             {!showFull && !fullLoading && (
               <img
+                ref={imgRef}
                 src={thumbUrl(previewItem.thumb_hash)}
                 alt={previewItem.id}
-                className="pointer-events-auto max-h-[85vh] max-w-[90vw] select-none"
+                className="pointer-events-auto h-[85vh] w-[90vw] select-none object-contain"
                 style={{
                   transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})`,
                 }}
@@ -1350,7 +1352,7 @@ export default function WallpaperTool() {
                 ref={imgRef}
                 src={dataUrl}
                 alt={previewItem.id}
-                className="pointer-events-auto max-h-[85vh] max-w-[90vw] select-none"
+                className="pointer-events-auto h-[85vh] w-[90vw] select-none object-contain"
                 style={{
                   transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})`,
                 }}
