@@ -72,6 +72,8 @@ jobs:
           cargo llvm-cov report \
             --ignore-filename-regex 'runtime\.rs' \
             --show-missing-lines 2>&1 || true
+          echo "--- LCOV UNCOVERED LINES ---"
+          awk -F: '/^SF:/{f=$0} /^DA:/{split($0,a,"[=,]"): if(a[3]==0) print f, $0}' ../coverage/backend.info || true
       - name: Upload to Codecov
         uses: codecov/codecov-action@v6
         with:
