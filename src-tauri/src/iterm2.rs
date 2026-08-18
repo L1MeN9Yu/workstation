@@ -49,7 +49,17 @@ pub fn list_iterm2_profiles_at(dir: &Path) -> Result<Vec<Iterm2ProfileFile>, Str
 pub fn write_iterm2_profile_at(dir: &Path, name: &str, content: &str) -> Result<(), String> {
     let file_name = validate_profile_name(name)?;
     serde_json::from_str::<Value>(content).map_err(|e| format!("invalid JSON: {e}"))?;
-    write_text_file_atomic(&dir.join(file_name), content)
+    let path = dir.join(&file_name);
+    // iTerm 实时监控 DynamicProfiles 目录，任何中间文件（如原子写的 tmp-*）都会被它
+    // 当作 profile 解析并弹出格式错误警告。因此此处直接覆写目标文件，不落中间状态；
+    // 内容未变化时跳过写入，避免 reload 场景触发无谓的目录事件。
+    if let Ok(existing) = fs::read_to_string(&path) {
+        if existing == content {
+            return Ok(());
+        }
+    }
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    fs::write(&path, content).map_err(|e| e.to_string())
 }
 
 fn validate_profile_name(name: &str) -> Result<String, String> {
@@ -80,25 +90,6 @@ pub fn delete_iterm2_profile_at(dir: &Path, name: &str) -> Result<(), String> {
         return Err(format!("profile not found: {file_name}"));
     }
     fs::remove_file(&path).map_err(|e| e.to_string())
-}
-
-fn write_text_file_atomic(path: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension(format!(
-        "tmp-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    fs::write(&tmp, content).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        e.to_string()
-    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -301,6 +292,36 @@ mod tests {
     }
 
     #[test]
+    fn write_iterm2_profile_at_creates_parent_dirs_and_overwrites() {
+        let dir = temp_dir("write-overwrite");
+        let path = dir.join("nested").join("same.json");
+        write_iterm2_profile_at(path.parent().unwrap(), "same", r#"{"Name":"A"}"#).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"Name":"A"}"#);
+        write_iterm2_profile_at(path.parent().unwrap(), "same", r#"{"Name":"B"}"#).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"Name":"B"}"#);
+    }
+
+    #[test]
+    fn write_iterm2_profile_at_skips_when_content_unchanged() {
+        let dir = temp_dir("write-skip");
+        let path = dir.join("skip.json");
+        write_iterm2_profile_at(&dir, "skip", "{}").unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        write_iterm2_profile_at(&dir, "skip", "{}").unwrap();
+        let after = fs::metadata(&path).unwrap().modified().unwrap();
+        // 内容未变时不得覆写文件，避免触发 iTerm 目录事件（mtime 不变）
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn write_iterm2_profile_at_skips_when_file_missing() {
+        let dir = temp_dir("write-missing-skip");
+        // 首次写入走 read_to_string 失败分支，随后正常落盘
+        write_iterm2_profile_at(&dir, "fresh", "{}").unwrap();
+        assert_eq!(fs::read_to_string(dir.join("fresh.json")).unwrap(), "{}");
+    }
+
+    #[test]
     fn delete_iterm2_profile_at_removes_existing_file() {
         let dir = temp_dir("delete-ok");
         fs::write(dir.join("del.json"), "{}").unwrap();
@@ -348,49 +369,20 @@ mod tests {
         }
         #[cfg(not(unix))]
         {
+            // 目标父路径是普通文件时，write 的 create_dir_all 会失败。
             let blocker = dir.join("blocker");
             fs::write(&blocker, "i am a file").unwrap();
-            let path = blocker.join("nested").join("x.json");
-            assert!(write_text_file_atomic(&path, "{}").is_err());
+            assert!(write_iterm2_profile_at(&blocker, "x", "{}").is_err());
         }
     }
 
     #[test]
-    fn write_text_file_atomic_creates_parent_dirs() {
-        let dir = temp_dir("atomic-parents");
-        let path = dir.join("nested").join("deep").join("config");
-        write_text_file_atomic(&path, "hello").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
-    }
-
-    #[test]
-    fn write_text_file_atomic_skips_create_dir_when_no_parent() {
-        let err = write_text_file_atomic(Path::new("/"), "hi").unwrap_err();
-        assert!(!err.is_empty());
-    }
-
-    #[test]
-    fn write_text_file_atomic_cleans_up_tmp_on_rename_failure() {
-        let dir = temp_dir("atomic-rename-fail");
-        let path = dir.join("target");
-        fs::create_dir_all(&path).unwrap();
-        let err = write_text_file_atomic(&path, "hi").unwrap_err();
-        assert!(!err.is_empty());
-        let leftover: Vec<_> = fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains("tmp-"))
-            .collect();
-        assert!(leftover.is_empty(), "temp files left behind");
-    }
-
-    #[test]
-    fn write_text_file_atomic_errors_when_parent_is_a_file() {
-        let dir = temp_dir("atomic-parent-file");
+    fn write_iterm2_profile_at_errors_when_dir_is_a_file() {
+        let dir = temp_dir("write-dir-file");
         let blocker = dir.join("blocker");
         fs::write(&blocker, "i am a file, not a dir").unwrap();
-        let path = blocker.join("nested").join("data.json");
-        assert!(write_text_file_atomic(&path, "{}").is_err());
+        // create_dir_all(blocker) 因 blocker 是文件而失败
+        assert!(write_iterm2_profile_at(&blocker, "x", "{}").is_err());
     }
 
     #[test]
