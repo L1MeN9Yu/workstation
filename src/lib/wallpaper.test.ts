@@ -350,13 +350,11 @@ describe("wallpaper", () => {
       downloadDir: "/d",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",
-      cacheLimitBytes: 20 * 1024 * 1024 * 1024,
     });
     expect(writeConfig).toHaveBeenCalledWith("wallpaper", {
       downloadDir: "/d",
       defaultApplyTarget: "iterm2",
       iterm2Profile: "work.json",
-      cacheLimitBytes: 20 * 1024 * 1024 * 1024,
     });
   });
 

@@ -102,11 +102,9 @@ pub async fn fetch_iterm2_keys() -> Vec<Iterm2RemoteKey> {
 }
 
 #[tauri::command]
-pub async fn list_system_fonts(app: AppHandle) -> Vec<String> {
+pub async fn list_system_fonts(_app: AppHandle) -> Vec<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let cache = app.state::<crate::fonts::FontCache>();
-        let cache = &cache.0;
-        crate::fonts::list_font_families_cached(cache, || {
+        crate::fonts::list_font_families_cached(|| {
             let mut db = fontdb::Database::new();
             db.load_system_fonts();
             db.faces().cloned().collect()
@@ -201,7 +199,19 @@ fn wallpaper_settings_from_config() -> WallpaperSettings {
     // 全局代理配置优先：非空走全局代理（reqwest .proxy() 自动禁用系统代理），
     // 为空则直连（不再使用壁纸旧默认代理）。
     settings.proxy = read_global_proxy();
+    // app 级缓存容量优先：读取 appCache.json 的 cacheLimitBytes 覆盖壁纸配置值
+    // （运行时值不持久化；app 级未配置时保留壁纸配置旧值兜底）。
+    if let Ok(Some(limit)) = get_app_cache_limit() {
+        settings.cache_limit_bytes = Some(limit);
+    }
     settings
+}
+
+/// 读取 app 级缓存容量上限（字节）；配置缺失或解析失败返回 None。
+fn get_app_cache_limit() -> Result<Option<u64>, ()> {
+    let raw = read_config_impl("appCache".to_string()).map_err(|_| ())?;
+    let settings: crate::app_cache::CacheSettings = serde_json::from_value(raw).map_err(|_| ())?;
+    Ok(settings.cache_limit_bytes)
 }
 
 /// 读取全局代理配置 `proxy.json` 的 `proxy` 字段；缺失/解析失败/空串返回 None（直连）。
@@ -268,11 +278,42 @@ pub fn get_wallpaper_cache_stats(app: AppHandle) -> WallpaperCacheStats {
     }
 }
 
+/// 读取 app 级缓存配置（`appCache.json` 的 `cacheLimitBytes`）。
+#[tauri::command]
+pub fn get_cache_settings() -> crate::app_cache::CacheSettings {
+    read_config_impl("appCache".to_string())
+        .ok()
+        .and_then(|value| serde_json::from_value::<crate::app_cache::CacheSettings>(value).ok())
+        .unwrap_or_default()
+}
+
+/// 保存 app 级缓存配置（`appCache.json` 的 `cacheLimitBytes`）。
+#[tauri::command]
+pub fn save_cache_settings(settings: crate::app_cache::CacheSettings) -> Result<(), String> {
+    let value = serde_json::to_value(&settings).map_err(|e| format!("serialize failed: {e}"))?;
+    write_config_impl("appCache".to_string(), value)
+}
+
 /// 清空缓存池（仅缓存文件，不影响本地壁纸库与配置）。
 #[tauri::command]
 pub fn clear_wallpaper_cache(app: AppHandle) -> Result<(), String> {
     let root = wallpaper_cache_root(&app)?;
     wallpaper::clear_wallpaper_cache(&root)
+}
+
+/// 查询 app 通用内存缓存统计（各命名空间条目数、总条目数、容量上限、命中/未命中）。
+#[tauri::command]
+pub fn get_app_cache_stats() -> crate::app_cache::AppCacheStats {
+    crate::app_cache::stats()
+}
+
+/// 清空 app 通用内存缓存：namespace 为 Some 时仅清指定命名空间，None 时清全部。
+#[tauri::command]
+pub fn clear_app_cache(namespace: Option<String>) {
+    match namespace {
+        Some(ns) => crate::app_cache::clear_namespace(&ns),
+        None => crate::app_cache::clear_all(),
+    }
 }
 
 #[tauri::command]
@@ -433,7 +474,6 @@ pub fn run() {
             fs::create_dir_all(cache_root.join("full"))
                 .map_err(|e| format!("cannot create full cache dir: {e}"))?;
             app.manage(ThumbState::new(cache_dir));
-            app.manage(crate::fonts::FontCache::default());
             Ok(())
         })
         .register_uri_scheme_protocol("thumb", |webview, request| {
@@ -499,6 +539,10 @@ pub fn run() {
             has_wallpaper_full_cache,
             get_wallpaper_cache_stats,
             clear_wallpaper_cache,
+            get_cache_settings,
+            save_cache_settings,
+            get_app_cache_stats,
+            clear_app_cache,
             list_local_wallpapers,
             wallpaper_thumb,
             read_local_wallpaper_file,

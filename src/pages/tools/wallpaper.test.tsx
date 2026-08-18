@@ -4,9 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import WallpaperTool from "./wallpaper";
 import {
   applyWallpaper,
-  clearWallpaperCache,
   downloadWallpaper,
-  getWallpaperCacheStats,
   hasWallpaperFullCache,
   listLocalWallpapers,
   loadWallpaperSettings,
@@ -70,13 +68,6 @@ vi.mock("../../lib/wallpaper", () => ({
   loadWallpaperSettings: vi.fn(),
   previewWallpaper: vi.fn(),
   hasWallpaperFullCache: vi.fn().mockResolvedValue(false),
-  getWallpaperCacheStats: vi.fn().mockResolvedValue({
-    totalBytes: 1000,
-    thumbBytes: 300,
-    fullBytes: 700,
-    limitBytes: 50 * 1024 * 1024 * 1024,
-  }),
-  clearWallpaperCache: vi.fn().mockResolvedValue(undefined),
   saveWallpaperProxy: vi.fn().mockResolvedValue(undefined),
   saveWallpaperSources: vi.fn().mockResolvedValue(undefined),
   searchWallpapers: vi.fn(),
@@ -956,97 +947,6 @@ describe("WallpaperTool", () => {
         iterm2Profile: "home.json",
       }),
     );
-  });
-
-  it("settings panel shows cache stats and saves adjusted cache limit", async () => {
-    await flush();
-    const settingsBtn = Array.from(
-      container.querySelectorAll("button"),
-    ).find((b) => b.textContent === "设置")!;
-    await act(async () => {
-      settingsBtn.click();
-    });
-    await flush();
-    expect(container.textContent).toContain("壁纸缓存");
-    // beforeEach 默认 mock：total=1000, thumb=300, full=700, limit=50GB
-    expect(container.textContent).toContain("已用 1000B / 上限 53687091200B");
-    expect(container.textContent).toContain("缩略图 300B");
-    expect(container.textContent).toContain("原图 700B");
-    const label = Array.from(container.querySelectorAll("label")).find((l) =>
-      l.textContent?.includes("缓存容量上限"),
-    )!;
-    const input = label.querySelector("input")! as HTMLInputElement;
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )!.set!;
-      setter.call(input, "80");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    const saveBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "保存设置",
-    )!;
-    await act(async () => {
-      saveBtn.click();
-    });
-    expect(saveWallpaperProxy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        cacheLimitBytes: 80 * 1024 * 1024 * 1024,
-      }),
-    );
-  });
-
-  it("clear cache requires confirmation and clears on confirm", async () => {
-    await flush();
-    const settingsBtn = Array.from(
-      container.querySelectorAll("button"),
-    ).find((b) => b.textContent === "设置")!;
-    await act(async () => {
-      settingsBtn.click();
-    });
-    await flush();
-    const clearBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "清空缓存",
-    )!;
-    await act(async () => {
-      clearBtn.click();
-    });
-    expect(container.textContent).toContain("不影响已下载壁纸");
-    expect(clearWallpaperCache).not.toHaveBeenCalled();
-    const confirmBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "确认清空",
-    )!;
-    await act(async () => {
-      confirmBtn.click();
-    });
-    await flush();
-    expect(clearWallpaperCache).toHaveBeenCalledTimes(1);
-    expect(toast.success).toHaveBeenCalledWith("缓存已清空");
-    expect(getWallpaperCacheStats).toHaveBeenCalled();
-  });
-
-  it("clear cache can be cancelled without clearing", async () => {
-    await flush();
-    const settingsBtn = Array.from(
-      container.querySelectorAll("button"),
-    ).find((b) => b.textContent === "设置")!;
-    await act(async () => {
-      settingsBtn.click();
-    });
-    const clearBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "清空缓存",
-    )!;
-    await act(async () => {
-      clearBtn.click();
-    });
-    const cancelBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "取消",
-    )!;
-    await act(async () => {
-      cancelBtn.click();
-    });
-    expect(clearWallpaperCache).not.toHaveBeenCalled();
   });
 
   it("exposes the selected source settings outside the settings panel", async () => {
