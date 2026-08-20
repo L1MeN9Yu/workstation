@@ -591,6 +591,26 @@ pub fn run() {
                             .unwrap()
                     });
             }
+            // 缓存未命中：若该 hash 已登记且没有在途下载，则立即发起一次真实网络拉取。
+            // 成功后 emit thumb-ready 驱动前端重挂载；失败则交给前端下一轮重试再次触发，
+            // 从而保证「点击/自动重试」等价于重新走网络而非仅重查缓存。
+            if state.resolve(&hash).is_some() && !state.in_flight(&hash) {
+                let handle = app.clone();
+                let hash = hash.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<ThumbState>();
+                    let settings = wallpaper_settings_from_config();
+                    match state.get_or_fetch(&hash, &settings).await {
+                        Ok(_) => {
+                            let _ = handle.emit("thumb-ready", ());
+                        }
+                        Err(e) if e.contains("already in progress") => {
+                            // 并发下他人已接管下载，其完成时会 emit，无需在此重复处理。
+                        }
+                        Err(e) => log::error!("thumb fetch-on-miss failed (hash={hash}): {e}"),
+                    }
+                });
+            }
             log::info!("thumb miss, deferring to frontend retry: {hash}");
             http::Response::builder()
                 .status(404)
