@@ -1,5 +1,18 @@
 # workstation
 
+## 0.6.0
+
+### Minor Changes
+
+- 壁纸搜索历史与 SQLite 存储基建
+  
+  - 每个壁纸图源（wallhaven / Danbooru / Safebooru）独立维护搜索历史，持久化到 SQLite（去重置顶、无上限，发起非随机搜索即记录）
+  - 搜索框下方常驻「搜索历史」分页区块：8 条/页翻页、点击即回搜、单条删除、清空当前站点
+  - 引入项目级 SQLite 存储基建（rusqlite bundled + 迁移执行器），为后续功能复用
+  - 修复：iTerm profile 写入不再残留 tmp 中间文件，消除 iTerm 格式错误弹窗
+  - 修复：版本同步脚本同时回写 Cargo.toml，界面版本号与实际版本对齐
+  - 修复：缩略图后台预取失败时记录具体错误日志，便于排查
+
 ## 0.4.0
 
 ### Minor Changes
