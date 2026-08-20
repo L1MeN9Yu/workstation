@@ -3,12 +3,17 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import WallpaperTool from "./wallpaper";
 import {
+  addBlacklistedWallpapers,
   applyWallpaper,
+  clearBlacklistedWallpapers,
   downloadWallpaper,
+  fetchBlacklistedThumb,
   hasWallpaperFullCache,
+  listBlacklistedWallpaperPage,
   listLocalWallpapers,
   loadWallpaperSettings,
   previewWallpaper,
+  removeBlacklistedWallpapers,
   saveWallpaperProxy,
   saveWallpaperSources,
   searchWallpapers,
@@ -82,6 +87,14 @@ vi.mock("../../lib/wallpaper", () => ({
   fetchWallpaperThumb: vi.fn().mockResolvedValue("data:image/jpeg;base64,thumb"),
   readLocalWallpaperFile: vi.fn(),
   deleteLocalWallpapers: vi.fn(),
+  addBlacklistedWallpapers: vi.fn(),
+  listBlacklistedWallpapers: vi.fn(),
+  listBlacklistedWallpaperPage: vi.fn(),
+  removeBlacklistedWallpapers: vi.fn(),
+  clearBlacklistedWallpapers: vi.fn(),
+  fetchBlacklistedThumb: vi
+    .fn()
+    .mockResolvedValue("data:image/jpeg;base64,blk"),
   formatFileSize: (bytes: number) => `${bytes}B`,
   formatModifiedTime: (ms: number) => `t${ms}`,
   loadWallpaperSettings: vi.fn(),
@@ -2359,6 +2372,621 @@ describe("WallpaperTool", () => {
       ).toBeDefined();
       // 切回搜索视图后参数面板恢复显示
       expect(container.textContent).toContain("wallhaven 参数");
+    });
+  });
+
+  describe("拉黑操作", () => {
+    const ITEM_C: WallpaperItem = {
+      id: "wallhaven-third",
+      source: "wallhaven",
+      thumb_url: "https://thumb.example/c.jpg",
+      thumb_hash: "cccccccccccccccc",
+      full_url: "https://full.example/c.jpg",
+      width: 1024,
+      height: 768,
+    };
+
+    function searchBtn(): HTMLButtonElement {
+      return Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+    }
+
+    /** 卡片右上角「更多操作」按钮（⋯） */
+    function moreMenuBtn(card: HTMLElement): HTMLButtonElement {
+      return Array.from(card.querySelectorAll("button")).find(
+        (b) => b.getAttribute("aria-label")?.startsWith("更多操作"),
+      )!;
+    }
+
+    /** 卡片已展开菜单中的指定项（拉黑 / 复制 URL） */
+    function cardMenuBtn(
+      card: HTMLElement,
+      text: string,
+    ): HTMLButtonElement | undefined {
+      return Array.from(card.querySelectorAll("button")).find(
+        (b) => b.textContent === text,
+      );
+    }
+
+    function positionText(dialog: HTMLElement): string {
+      return (
+        dialog.querySelector('[aria-label="预览位置"]')!.textContent ?? ""
+      );
+    }
+
+    async function searchResults(results: WallpaperItem[]): Promise<void> {
+      vi.mocked(searchWallpapers).mockResolvedValue(results);
+      await flush();
+      await act(async () => {
+        searchBtn().click();
+      });
+      await flush();
+    }
+
+    /** 搜索结果卡片（panel 内层容器也含有 overflow-hidden rounded-lg，故限定 cursor-pointer） */
+    function cards(): NodeListOf<HTMLElement> {
+      return container.querySelectorAll(
+        ".overflow-hidden.rounded-lg.cursor-pointer",
+      );
+    }
+
+    /** 点击多张卡片结果里的第 index 张打开预览并加载原图 */
+    async function openLightboxAt(
+      results: WallpaperItem[],
+      index: number,
+    ): Promise<HTMLElement> {
+      await searchResults(results);
+      await act(async () => {
+        const cards = container.querySelectorAll(
+          ".overflow-hidden.rounded-lg",
+        );
+        (cards[index] as HTMLElement).click();
+      });
+      await flush();
+      const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
+      const viewFullBtn = Array.from(dialog.querySelectorAll("button")).find(
+        (b) => b.textContent === "查看原图",
+      );
+      if (viewFullBtn) {
+        await act(async () => {
+          viewFullBtn.click();
+        });
+        await flush();
+      }
+      return dialog;
+    }
+
+    it("卡片菜单拉黑：加入黑名单、移除卡片并 toast，且不打开预览", async () => {
+      vi.mocked(addBlacklistedWallpapers).mockResolvedValue(1);
+      await searchResults([PREVIEW_ITEM, PREVIEW_ITEM_2]);
+      expect(cards().length).toBe(2);
+      const firstCard = cards()[0];
+      await act(async () => {
+        moreMenuBtn(firstCard).click();
+      });
+      await flush();
+      await act(async () => {
+        cardMenuBtn(firstCard, "拉黑")!.click();
+      });
+      await flush();
+      expect(addBlacklistedWallpapers).toHaveBeenCalledWith([
+        { url: PREVIEW_ITEM.full_url, thumbUrl: PREVIEW_ITEM.thumb_url },
+      ]);
+      expect(toast.success).toHaveBeenCalledWith("已加入黑名单");
+      expect(cards().length).toBe(1);
+      expect(container.textContent).not.toContain("1920×1080");
+      expect(container.textContent).toContain("2560×1440");
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("卡片菜单拉黑失败：toast 错误含后端语义且列表不变", async () => {
+      vi.mocked(addBlacklistedWallpapers).mockRejectedValue(
+        new Error("该壁纸已被拉黑，无法下载/预览"),
+      );
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      await act(async () => {
+        moreMenuBtn(firstCard).click();
+      });
+      await flush();
+      await act(async () => {
+        cardMenuBtn(firstCard, "拉黑")!.click();
+      });
+      await flush();
+      expect(toast.error).toHaveBeenCalledWith(
+        "拉黑失败：Error: 该壁纸已被拉黑，无法下载/预览",
+      );
+      expect(cards().length).toBe(1);
+      expect(container.textContent).toContain("1920×1080");
+    });
+
+    it("卡片菜单复制 URL：复制原图 URL 并 toast", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(window.navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+      try {
+        await searchResults([PREVIEW_ITEM]);
+        const firstCard = cards()[0];
+        await act(async () => {
+          moreMenuBtn(firstCard).click();
+        });
+        await flush();
+        await act(async () => {
+          cardMenuBtn(firstCard, "复制 URL")!.click();
+        });
+        await flush();
+        expect(writeText).toHaveBeenCalledWith(PREVIEW_ITEM.full_url);
+        expect(toast.success).toHaveBeenCalledWith("已复制原图 URL");
+        expect(container.querySelector('[role="dialog"]')).toBeNull();
+      } finally {
+        delete (window.navigator as { clipboard?: unknown }).clipboard;
+      }
+    });
+
+    it("卡片菜单复制 URL 失败：toast 报错", async () => {
+      const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+      Object.defineProperty(window.navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+      try {
+        await searchResults([PREVIEW_ITEM]);
+        const firstCard = cards()[0];
+        await act(async () => {
+          moreMenuBtn(firstCard).click();
+        });
+        await flush();
+        await act(async () => {
+          cardMenuBtn(firstCard, "复制 URL")!.click();
+        });
+        await flush();
+        expect(toast.error).toHaveBeenCalledWith("复制失败：Error: denied");
+      } finally {
+        delete (window.navigator as { clipboard?: unknown }).clipboard;
+      }
+    });
+
+    it("不支持剪贴板时复制 URL 报错", async () => {
+      delete (window.navigator as { clipboard?: unknown }).clipboard;
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      await act(async () => {
+        moreMenuBtn(firstCard).click();
+      });
+      await flush();
+      await act(async () => {
+        cardMenuBtn(firstCard, "复制 URL")!.click();
+      });
+      await flush();
+      expect(toast.error).toHaveBeenCalledWith(
+        "复制失败：Error: 当前环境不支持剪贴板",
+      );
+    });
+
+    it("点击其他区域或按 Esc 关闭更多菜单", async () => {
+      await searchResults([PREVIEW_ITEM, PREVIEW_ITEM_2]);
+      const firstCard = cards()[0];
+      await act(async () => {
+        moreMenuBtn(firstCard).click();
+      });
+      await flush();
+      expect(cardMenuBtn(firstCard, "复制 URL")).toBeTruthy();
+      const grid = container.querySelector(".grid.grid-cols-2") as HTMLElement;
+      await act(async () => {
+        grid.click();
+      });
+      await flush();
+      expect(cardMenuBtn(firstCard, "复制 URL")).toBeUndefined();
+      await act(async () => {
+        moreMenuBtn(firstCard).click();
+      });
+      await flush();
+      expect(cardMenuBtn(firstCard, "复制 URL")).toBeTruthy();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      });
+      await flush();
+      expect(cardMenuBtn(firstCard, "复制 URL")).toBeUndefined();
+    });
+
+    it("预览中拉黑当前壁纸：关闭预览并从列表移除", async () => {
+      vi.mocked(addBlacklistedWallpapers).mockResolvedValue(0);
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightboxAt([PREVIEW_ITEM, PREVIEW_ITEM_2], 0);
+      const blacklistBtn = Array.from(dialog.querySelectorAll("button")).find(
+        (b) => b.textContent === "拉黑",
+      )!;
+      await act(async () => {
+        blacklistBtn.click();
+      });
+      await flush();
+      expect(addBlacklistedWallpapers).toHaveBeenCalledWith([
+        { url: PREVIEW_ITEM.full_url, thumbUrl: PREVIEW_ITEM.thumb_url },
+      ]);
+      expect(toast.success).toHaveBeenCalledWith("已加入黑名单");
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+      expect(cards().length).toBe(1);
+      expect(container.textContent).toContain("2560×1440");
+    });
+
+    it("预览第3张时拉黑前面的卡片：预览索引自动前移并仍展示原图", async () => {
+      vi.mocked(addBlacklistedWallpapers).mockResolvedValue(0);
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightboxAt(
+        [PREVIEW_ITEM, PREVIEW_ITEM_2, ITEM_C],
+        2,
+      );
+      expect(positionText(dialog)).toBe("3 / 3");
+      await act(async () => {
+        moreMenuBtn(cards()[0]).click();
+      });
+      await flush();
+      await act(async () => {
+        cardMenuBtn(cards()[0], "拉黑")!.click();
+      });
+      await flush();
+      const dialog2 = container.querySelector(
+        '[role="dialog"]',
+      ) as HTMLElement;
+      expect(positionText(dialog2)).toBe("2 / 2");
+      expect(dialog2.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,X",
+      );
+      expect(cards().length).toBe(2);
+    });
+
+    it("预览第1张时拉黑后面的卡片：预览索引不变", async () => {
+      vi.mocked(addBlacklistedWallpapers).mockResolvedValue(0);
+      vi.mocked(previewWallpaper).mockResolvedValue("data:image/jpeg;base64,X");
+      const dialog = await openLightboxAt([PREVIEW_ITEM, PREVIEW_ITEM_2], 0);
+      await act(async () => {
+        moreMenuBtn(cards()[1]).click();
+      });
+      await flush();
+      await act(async () => {
+        cardMenuBtn(cards()[1], "拉黑")!.click();
+      });
+      await flush();
+      const dialog2 = container.querySelector(
+        '[role="dialog"]',
+      ) as HTMLElement;
+      expect(positionText(dialog2)).toBe("1 / 1");
+      expect(dialog.textContent).toContain("1920×1080");
+    });
+  });
+
+  describe("黑名单管理", () => {
+    function blacklistBtn(): HTMLButtonElement | undefined {
+      return Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "黑名单",
+      );
+    }
+
+    function panel(): HTMLElement | null {
+      return container.querySelector('[aria-label="壁纸黑名单"]');
+    }
+
+    function panelButton(btn: HTMLElement, text: string): HTMLButtonElement {
+      return Array.from(btn.querySelectorAll("button")).find(
+        (b) => b.textContent === text,
+      )!;
+    }
+
+    async function openPanel(): Promise<HTMLElement> {
+      await act(async () => {
+        blacklistBtn()!.click();
+      });
+      await flush();
+      return panel()!;
+    }
+
+    const PAGE_A = [
+      { url: "https://full.example/a.jpg", thumbUrl: "https://thumb.example/a.jpg" },
+      { url: "https://full.example/legacy.jpg" },
+    ];
+
+    function mockPage(
+      items: { url: string; thumbUrl?: string }[],
+      total: number,
+    ): void {
+      vi.mocked(listBlacklistedWallpaperPage).mockResolvedValue({ items, total });
+    }
+
+    beforeEach(() => {
+      mockPage(PAGE_A, 2);
+    });
+
+    it("黑名单按钮仅在搜索视图显示", async () => {
+      await flush();
+      expect(blacklistBtn()).toBeDefined();
+      const libBtn = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "本地壁纸库",
+      )!;
+      await act(async () => {
+        libBtn.click();
+      });
+      await flush();
+      expect(blacklistBtn()).toBeUndefined();
+    });
+
+    it("打开面板渲染条目：总数、图源标签、缩略图请求与 URL 展示", async () => {
+      const p = await openPanel();
+      expect(listBlacklistedWallpaperPage).toHaveBeenCalledWith(1, 20, "");
+      expect(p.textContent).toContain("共 2 条");
+      expect(p.textContent).toContain("https://full.example/a.jpg");
+      expect(p.textContent).toContain("https://full.example/legacy.jpg");
+      expect(fetchBlacklistedThumb).toHaveBeenCalledWith(
+        "https://thumb.example/a.jpg",
+      );
+      expect(p.querySelectorAll("img").length).toBe(1);
+      expect(p.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,blk",
+      );
+    });
+
+    it("图源标签按域名推断（wallhaven/Danbooru/Safebooru/其他/空）", async () => {
+      mockPage(
+        [
+          { url: "https://wallhaven.cc/w/a.jpg" },
+          { url: "https://danbooru.donmai.us/posts/1" },
+          { url: "https://safebooru.org/index.php?id=1" },
+          { url: "https://example.com/1.jpg" },
+          { url: "" },
+        ],
+        5,
+      );
+      const p = await openPanel();
+      expect(p.textContent).toContain("wallhaven");
+      expect(p.textContent).toContain("Danbooru");
+      expect(p.textContent).toContain("Safebooru");
+      expect(p.textContent).toContain("example.com");
+      expect(p.textContent).toContain("未知");
+    });
+
+    it("黑名单为空时显示空态", async () => {
+      mockPage([], 0);
+      const p = await openPanel();
+      expect(p.textContent).toContain("暂无黑名单");
+      expect(panelButton(p, "清空全部")).toBeDefined();
+    });
+
+    it("打开面板失败时 toast 错误并关闭面板", async () => {
+      vi.mocked(listBlacklistedWallpaperPage).mockRejectedValue(
+        new Error("load fail"),
+      );
+      await act(async () => {
+        blacklistBtn()!.click();
+      });
+      await flush();
+      expect(toast.error).toHaveBeenCalledWith(
+        "加载黑名单失败：Error: load fail",
+      );
+      expect(panel()).toBeNull();
+    });
+
+    it("搜索框输入按关键词过滤（回到第 1 页）", async () => {
+      mockPage([], 0);
+      const p = await openPanel();
+      const input = p.querySelector(
+        'input[aria-label="搜索黑名单"]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, "legacy");
+      await act(async () => {
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await flush();
+      await flush();
+      expect(listBlacklistedWallpaperPage).toHaveBeenLastCalledWith(1, 20, "legacy");
+      expect(p.textContent).toContain("暂无黑名单");
+    });
+
+    it("翻页：下一页加载第 2 页，边界按钮禁用状态正确", async () => {
+      const many = Array.from({ length: 25 }, (_, i) => ({
+        url: `https://p/${i}.jpg`,
+      }));
+      mockPage(many.slice(0, 20), 25);
+      const p = await openPanel();
+      expect(p.textContent).toContain("第 1 / 2 页");
+      const prevBtn = Array.from(p.querySelectorAll("button")).find(
+        (b) => b.textContent === "上一页",
+      )!;
+      expect(prevBtn.hasAttribute("disabled")).toBe(true);
+      mockPage(many.slice(20), 25);
+      await act(async () => {
+        panelButton(p, "下一页").click();
+      });
+      await flush();
+      expect(listBlacklistedWallpaperPage).toHaveBeenLastCalledWith(2, 20, "");
+      expect(p.textContent).toContain("第 2 / 2 页");
+      expect(panelButton(p, "下一页").hasAttribute("disabled")).toBe(true);
+    });
+
+    it("缩略图就绪前显示骨架，失败显示占位", async () => {
+      let resolveThumb!: (v: string) => void;
+      vi.mocked(fetchBlacklistedThumb).mockImplementation(
+        (url: string) =>
+          url === "tA"
+            ? new Promise((r) => {
+                resolveThumb = r;
+              })
+            : Promise.reject(new Error("fetch fail")),
+      );
+      mockPage(
+        [
+          { url: "A", thumbUrl: "tA" },
+          { url: "B", thumbUrl: "tB" },
+        ],
+        2,
+      );
+      const p = await openPanel();
+      expect(p.querySelector('div[role="status"]')).not.toBeNull();
+      expect(p.textContent).toContain("加载失败");
+      await act(async () => {
+        resolveThumb("data:image/jpeg;base64,OK");
+      });
+      await flush();
+      expect(p.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/jpeg;base64,OK",
+      );
+    });
+
+    it("缩略图请求在面板关闭后完成时不更新状态", async () => {
+      let resolveThumb!: (v: string) => void;
+      vi.mocked(fetchBlacklistedThumb).mockImplementation(
+        () =>
+          new Promise((r) => {
+            resolveThumb = r;
+          }),
+      );
+      mockPage([{ url: "A", thumbUrl: "tA" }], 1);
+      await openPanel();
+      await act(async () => {
+        panelButton(panel()!, "关闭").click();
+      });
+      expect(panel()).toBeNull();
+      await act(async () => {
+        resolveThumb("data:image/jpeg;base64,LATE");
+      });
+      await flush();
+
+      let rejectThumb!: (e: Error) => void;
+      vi.mocked(fetchBlacklistedThumb).mockImplementation(
+        () =>
+          new Promise((_, rej) => {
+            rejectThumb = rej;
+          }),
+      );
+      await openPanel();
+      await act(async () => {
+        panelButton(panel()!, "关闭").click();
+      });
+      await act(async () => {
+        rejectThumb(new Error("late"));
+      });
+      await flush();
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("移除单条黑名单：调用后端、重载当前页并 toast，已加载搜索结果不变", async () => {
+      vi.mocked(removeBlacklistedWallpapers).mockResolvedValue(1);
+      vi.mocked(searchWallpapers).mockResolvedValue([PREVIEW_ITEM]);
+      await flush();
+      await act(async () => {
+        Array.from(container.querySelectorAll("button"))
+          .find((b) => b.textContent === "搜索")!
+          .click();
+      });
+      await flush();
+      expect(
+        container.querySelectorAll(".overflow-hidden.rounded-lg").length,
+      ).toBe(1);
+      const p = await openPanel();
+      const firstRow = Array.from(p.querySelectorAll("li")).find((r) =>
+        r.textContent?.includes("https://full.example/a.jpg"),
+      )!;
+      mockPage([{ url: "https://full.example/legacy.jpg" }], 1);
+      await act(async () => {
+        panelButton(firstRow, "移除").click();
+      });
+      await flush();
+      expect(removeBlacklistedWallpapers).toHaveBeenCalledWith([
+        "https://full.example/a.jpg",
+      ]);
+      expect(toast.success).toHaveBeenCalledWith("已移除，重新搜索后可见");
+      expect(panel()!.textContent).not.toContain("https://full.example/a.jpg");
+      expect(panel()!.textContent).toContain("https://full.example/legacy.jpg");
+      expect(
+        container.querySelectorAll(
+          ".overflow-hidden.rounded-lg.cursor-pointer",
+        ).length,
+      ).toBe(1);
+    });
+
+    it("移除黑名单失败时 toast 错误", async () => {
+      vi.mocked(removeBlacklistedWallpapers).mockRejectedValue(
+        new Error("io"),
+      );
+      const p = await openPanel();
+      const firstRow = Array.from(p.querySelectorAll("li")).find((r) =>
+        r.textContent?.includes("https://full.example/a.jpg"),
+      )!;
+      await act(async () => {
+        panelButton(firstRow, "移除").click();
+      });
+      await flush();
+      expect(toast.error).toHaveBeenCalledWith("移除黑名单失败：Error: io");
+    });
+
+    it("清空黑名单需二次确认，确认后清空、显示空态并 toast", async () => {
+      vi.mocked(clearBlacklistedWallpapers).mockResolvedValue(undefined);
+      const p = await openPanel();
+      await act(async () => {
+        panelButton(p, "清空全部").click();
+      });
+      await flush();
+      expect(confirmDialog).toHaveBeenCalledWith(
+        expect.stringContaining("黑名单"),
+      );
+      expect(clearBlacklistedWallpapers).toHaveBeenCalled();
+      expect(toast.success).toHaveBeenCalledWith("黑名单已清空");
+      expect(panel()!.textContent).toContain("暂无黑名单");
+    });
+
+    it("取消清空确认时不执行", async () => {
+      vi.mocked(confirmDialog).mockResolvedValue(false);
+      const p = await openPanel();
+      await act(async () => {
+        panelButton(p, "清空全部").click();
+      });
+      await flush();
+      expect(clearBlacklistedWallpapers).not.toHaveBeenCalled();
+      expect(p.textContent).toContain("https://full.example/a.jpg");
+    });
+
+    it("清空失败时 toast 错误", async () => {
+      vi.mocked(clearBlacklistedWallpapers).mockRejectedValue(
+        new Error("io"),
+      );
+      const p = await openPanel();
+      await act(async () => {
+        panelButton(p, "清空全部").click();
+      });
+      await flush();
+      expect(clearBlacklistedWallpapers).toHaveBeenCalled();
+      expect(toast.error).toHaveBeenCalledWith("清空黑名单失败：Error: io");
+    });
+
+    it("黑名单面板可通过关闭按钮、✕ 与遮罩点击关闭", async () => {
+      await openPanel();
+      await act(async () => {
+        panelButton(panel()!, "关闭").click();
+      });
+      expect(panel()).toBeNull();
+
+      await openPanel();
+      await act(async () => {
+        (
+          panel()!.querySelector(
+            'button[aria-label="关闭黑名单"]',
+          ) as HTMLButtonElement
+        ).click();
+      });
+      expect(panel()).toBeNull();
+
+      await openPanel();
+      await act(async () => {
+        panel()!.dispatchEvent(
+          new MouseEvent("click", { bubbles: true }),
+        );
+      });
+      expect(panel()).toBeNull();
     });
   });
 });

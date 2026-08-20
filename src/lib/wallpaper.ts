@@ -269,6 +269,60 @@ export function previewWallpaper(item: WallpaperItem): Promise<string> {
   return invoke<string>("fetch_full_image", { item });
 }
 
+/** 黑名单中的一条壁纸记录：url 为原图 URL 匹配键，thumbUrl 仅用于管理面板展示 */
+export interface BlacklistEntry {
+  url: string;
+  thumbUrl?: string;
+}
+
+/** 黑名单分页查询结果（items 为当前页条目，total 为匹配总数的总条数） */
+export interface BlacklistPage {
+  items: BlacklistEntry[];
+  total: number;
+}
+
+/** 列出全部黑名单条目（按 url 排序） */
+export function listBlacklistedWallpapers(): Promise<BlacklistEntry[]> {
+  return invoke<BlacklistEntry[]>("list_blacklisted_wallpapers");
+}
+
+/** 分页查询黑名单（page 从 1 起；keyword 为 URL 模糊过滤关键字） */
+export function listBlacklistedWallpaperPage(
+  page: number,
+  pageSize: number,
+  keyword: string,
+): Promise<BlacklistPage> {
+  return invoke<BlacklistPage>("list_blacklisted_wallpaper_page", {
+    page,
+    pageSize,
+    keyword,
+  });
+}
+
+/** 将条目加入黑名单（后端按 url 去重合并），返回最新总条数 */
+export function addBlacklistedWallpapers(
+  items: BlacklistEntry[],
+): Promise<number> {
+  return invoke<number>("add_blacklisted_wallpapers", { items });
+}
+
+/** 按原图 URL 移除黑名单条目，返回最新总条数 */
+export function removeBlacklistedWallpapers(
+  urls: string[],
+): Promise<number> {
+  return invoke<number>("remove_blacklisted_wallpapers", { urls });
+}
+
+/** 清空全部黑名单 */
+export function clearBlacklistedWallpapers(): Promise<void> {
+  return invoke<void>("clear_blacklisted_wallpapers");
+}
+
+/** 拉取黑名单条目缩略图 data URL（管理面板展示用，走代理，不写统一缩略图缓存） */
+export function fetchBlacklistedThumb(url: string): Promise<string> {
+  return invoke<string>("fetch_blacklisted_thumb", { url });
+}
+
 /** 判断某张壁纸的原图是否已在磁盘缓存（预览打开时据此决定直接展示原图） */
 export function hasWallpaperFullCache(item: WallpaperItem): Promise<boolean> {
   return invoke<boolean>("has_wallpaper_full_cache", { item });
