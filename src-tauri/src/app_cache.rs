@@ -9,6 +9,9 @@ pub const APP_CACHE_MAX: usize = 256;
 /// 壁纸缩略图缓存命名空间。
 pub const NS_THUMBS: &str = "wallpaper-thumbs";
 
+/// 黑名单管理面板缩略图 data URL 缓存命名空间（按 url 键，不写入磁盘缓存池）。
+pub const NS_BLACKLIST_THUMBS: &str = "wallpaper-blacklist-thumbs";
+
 /// 系统字体列表缓存命名空间。
 pub const NS_FONTS: &str = "system-fonts";
 

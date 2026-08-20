@@ -117,7 +117,7 @@ impl WallpaperSettings {
     }
 }
 
-fn build_client(proxy: Option<&str>) -> Result<Client, String> {
+pub fn build_client(proxy: Option<&str>) -> Result<Client, String> {
     let mut builder = Client::builder().user_agent(USER_AGENT);
     if let Some(p) = proxy.filter(|p| !p.trim().is_empty()) {
         log::info!("using proxy: {p}");
@@ -1273,6 +1273,227 @@ impl ThumbState {
         let bytes = fs::read(&path).map_err(|e| format!("cache read failed: {e}"))?;
         Ok((bytes, mime_for_ext(ext)))
     }
+}
+
+/// 一条壁纸黑名单记录：`url` 为匹配键（原图 full_url），`thumbUrl` 仅用于管理面板展示。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlacklistEntry {
+    pub url: String,
+    pub thumb_url: Option<String>,
+}
+
+/// 黑名单配置文件的磁盘结构：新格式 `items`（条目列表）与旧格式 `urls`（纯 URL 数组）兼容读取。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BlacklistFile {
+    items: Vec<BlacklistEntry>,
+    urls: Vec<String>,
+}
+
+/// 黑名单缩略图 data URL 的内存缓存接口（runtime 适配 app_cache，测试注入 in-memory 实现）。
+pub trait BlacklistThumbCache {
+    fn get(&self, key: &str) -> Option<String>;
+    fn put(&self, key: &str, value: String);
+}
+
+/// 按 url trim + 去重（保留首次出现的 thumbUrl，trim 后为空的 thumbUrl 视为无）+ 稳定排序。
+fn normalize_blacklist(entries: Vec<BlacklistEntry>) -> Vec<BlacklistEntry> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<BlacklistEntry> = Vec::new();
+    for entry in entries {
+        let url = entry.url.trim().to_string();
+        if url.is_empty() || !seen.insert(url.clone()) {
+            continue;
+        }
+        out.push(BlacklistEntry {
+            url,
+            thumb_url: entry
+                .thumb_url
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
+        });
+    }
+    out.sort_by(|a, b| a.url.cmp(&b.url));
+    out
+}
+
+/// 查询黑名单总条数（表不存在返回 0 不报错）。
+pub fn count_blacklist_db(conn: &Connection) -> Result<i64, String> {
+    conn.query_row("SELECT COUNT(*) FROM wallpaper_blacklist", [], |row| {
+        row.get(0)
+    })
+    .map_err(|e| format!("cannot count wallpaper blacklist: {e}"))
+}
+
+/// 读取黑名单全部条目（按 url 排序，供搜索过滤使用的全集；表不存在或查询失败返回空列表）。
+pub fn load_blacklist_db(conn: &Connection) -> Vec<BlacklistEntry> {
+    let Ok(mut stmt) = conn.prepare("SELECT url, thumb_url FROM wallpaper_blacklist ORDER BY url")
+    else {
+        return Vec::new();
+    };
+    stmt.query_map([], |row| {
+        Ok(BlacklistEntry {
+            url: row.get(0)?,
+            thumb_url: row.get::<_, Option<String>>(1)?,
+        })
+    })
+    .map(|mapped| mapped.flatten().collect())
+    .unwrap_or_default()
+}
+
+/// 分页查询黑名单：支持按关键词模糊过滤 URL（page 从 1 起，limit 每页条数），按 url 排序。
+pub fn page_blacklist_db(
+    conn: &Connection,
+    keyword: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<BlacklistEntry>, String> {
+    let like = format!("%{}%", keyword.trim());
+    let mut stmt = conn
+        .prepare(
+            "SELECT url, thumb_url FROM wallpaper_blacklist
+             WHERE url LIKE ?1
+             ORDER BY url
+             LIMIT ?2 OFFSET ?3",
+        )
+        .map_err(|e| format!("cannot prepare blacklist page query: {e}"))?;
+    let rows = stmt
+        .query_map(params![like, limit, offset], |row| {
+            Ok(BlacklistEntry {
+                url: row.get(0)?,
+                thumb_url: row.get::<_, Option<String>>(1)?,
+            })
+        })
+        .map_err(|e| format!("cannot query blacklist page: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot collect blacklist page: {e}"))
+}
+
+/// 插入（已存在则忽略）条目，返回最新总条数。
+pub fn insert_blacklist_db(conn: &Connection, items: Vec<BlacklistEntry>) -> Result<i64, String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("cannot begin blacklist insert: {e}"))?;
+    for entry in normalize_blacklist(items) {
+        tx.execute(
+            "INSERT OR IGNORE INTO wallpaper_blacklist (url, thumb_url) VALUES (?1, ?2)",
+            params![entry.url, entry.thumb_url],
+        )
+        .map_err(|e| format!("cannot insert blacklist entry: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("cannot commit blacklist insert: {e}"))?;
+    count_blacklist_db(conn)
+}
+
+/// 按 url 删除条目（target 经 trim 后精确匹配），返回最新总条数。
+pub fn delete_blacklist_db(conn: &Connection, urls: Vec<String>) -> Result<i64, String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("cannot begin blacklist delete: {e}"))?;
+    for url in urls {
+        tx.execute(
+            "DELETE FROM wallpaper_blacklist WHERE url = ?1",
+            params![url.trim()],
+        )
+        .map_err(|e| format!("cannot delete blacklist entry: {e}"))?;
+    }
+    tx.commit()
+        .map_err(|e| format!("cannot commit blacklist delete: {e}"))?;
+    count_blacklist_db(conn)
+}
+
+/// 清空黑名单。
+pub fn clear_blacklist_db(conn: &Connection) -> Result<(), String> {
+    conn.execute("DELETE FROM wallpaper_blacklist", [])
+        .map_err(|e| format!("cannot clear blacklist: {e}"))?;
+    Ok(())
+}
+
+/// 一次性迁移旧配置文件：读取旧 `wallpaperBlacklist.json`（items/urls 兼容格式），
+/// 若存在旧数据且 DB 表为空则导入，并删除旧文件（注入的删除闭包）。返回导入条数（0 表示无旧数据或已有数据）。
+pub fn migrate_legacy_blacklist(
+    conn: &Connection,
+    read_legacy: impl FnOnce() -> Result<serde_json::Value, String>,
+    remove_legacy: impl FnOnce(),
+) -> Result<i64, String> {
+    if count_blacklist_db(conn)? > 0 {
+        return Ok(0); // 已有数据，不重复导入
+    }
+    let old: BlacklistFile = match read_legacy()
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+    {
+        Some(file) => file,
+        None => return Ok(0), // 无旧数据
+    };
+    let mut entries = old.items;
+    entries.extend(old.urls.into_iter().map(|url| BlacklistEntry {
+        url,
+        thumb_url: None,
+    }));
+    let entries = normalize_blacklist(entries);
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    insert_blacklist_db(conn, entries.clone())?;
+    remove_legacy(); // 导入成功后删除旧文件，避免下次重复导入
+    Ok(entries.len() as i64)
+}
+
+/// 判断单个 URL 是否在黑名单中：target 空白视为不在；否则按 url 精确匹配。
+pub fn is_blacklisted(entries: &[BlacklistEntry], target: &str) -> bool {
+    if target.trim().is_empty() {
+        return false;
+    }
+    entries.iter().any(|e| e.url == target)
+}
+
+/// 按 `full_url` 精确过滤掉命中黑名单的壁纸，返回保留（未拉黑）的列表。
+pub fn filter_blacklisted_impl(
+    items: Vec<WallpaperItem>,
+    entries: &[BlacklistEntry],
+) -> Vec<WallpaperItem> {
+    items
+        .into_iter()
+        .filter(|item| !is_blacklisted(entries, &item.full_url))
+        .collect()
+}
+
+/// 按图片字节开头的魔数嗅探 mime（png/gif/webp）；无法识别回退 image/jpeg。
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(&b"WEBP"[..]) {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
+}
+
+/// 拉取黑名单条目的缩略图并返回 data URL：先查注入的内存缓存（按 url 键）命中直接复用；
+/// 未命中经注入的 fetcher 下载字节，嗅探 mime 后构造 data URL 并写回缓存。
+/// 下载失败返回 Err 且不写缓存。绝不写磁盘，绝不写入统一缩略图缓存池。
+pub async fn fetch_blacklisted_thumb_with<F, Fut, C>(
+    fetcher: F,
+    cache: &C,
+    url: &str,
+) -> Result<String, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+    C: BlacklistThumbCache,
+{
+    if let Some(data_url) = cache.get(url) {
+        return Ok(data_url);
+    }
+    let bytes = fetcher(url.to_string()).await?;
+    let data_url = full_image_data_url(&bytes, sniff_image_mime(&bytes));
+    cache.put(url, data_url.clone());
+    Ok(data_url)
 }
 
 #[cfg(test)]
@@ -3819,5 +4040,436 @@ mod tests {
         assert_eq!(key, "/w/a.png:100:200");
         let other = thumb_cache_key(Path::new("/w/a.png"), 101, 200);
         assert_ne!(key, other);
+    }
+
+    // ---------- 壁纸黑名单 ----------
+
+    /// 黑名单测试的 SQLite 内存连接：应用迁移后建好 wallpaper_blacklist 表。
+    fn blacklist_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate(&conn).unwrap();
+        conn
+    }
+
+    /// 共享的旧文件读取闭包（保留 thumb，覆盖 read 被调用分支的行覆盖率）。
+    fn fake_legacy_reader(
+        value: serde_json::Value,
+    ) -> impl FnOnce() -> Result<serde_json::Value, String> {
+        move || Ok(value)
+    }
+
+    /// 共享的旧文件读取失败闭包。
+    fn fake_missing_legacy_reader() -> impl FnOnce() -> Result<serde_json::Value, String> {
+        move || Err("no legacy file".to_string())
+    }
+
+    /// 共享的删除旧文件闭包（写入 flag 供断言）。
+    fn fake_legacy_remover(flag: &std::cell::Cell<bool>) -> impl FnOnce() + '_ {
+        move || flag.set(true)
+    }
+
+    fn bl(url: &str) -> BlacklistEntry {
+        BlacklistEntry {
+            url: url.to_string(),
+            thumb_url: None,
+        }
+    }
+
+    fn bl_with_thumb(url: &str, thumb: &str) -> BlacklistEntry {
+        BlacklistEntry {
+            url: url.to_string(),
+            thumb_url: Some(thumb.to_string()),
+        }
+    }
+
+    fn item_with_url(url: &str) -> WallpaperItem {
+        WallpaperItem {
+            id: "wallhaven-bl".to_string(),
+            source: "wallhaven".to_string(),
+            thumb_url: String::new(),
+            thumb_hash: String::new(),
+            full_url: url.to_string(),
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    #[test]
+    fn blacklist_entry_serde_roundtrip_camel_case() {
+        let entry = bl_with_thumb("https://a/1.jpg", "https://t/1.jpg");
+        let json = serde_json::to_value(entry).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"url": "https://a/1.jpg", "thumbUrl": "https://t/1.jpg"})
+        );
+        let parsed: BlacklistEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.url, "https://a/1.jpg");
+        assert_eq!(parsed.thumb_url.as_deref(), Some("https://t/1.jpg"));
+        let missing: BlacklistEntry =
+            serde_json::from_value(serde_json::json!({"url": "u"})).unwrap();
+        assert_eq!(missing.thumb_url, None);
+    }
+
+    #[test]
+    fn count_empty_blacklist_table_returns_zero() {
+        let conn = blacklist_conn();
+        assert_eq!(count_blacklist_db(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn load_blacklist_db_missing_table_returns_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(load_blacklist_db(&conn).is_empty());
+    }
+
+    #[test]
+    fn insert_blacklist_trims_dedupes_sorts_and_returns_count() {
+        let conn = blacklist_conn();
+        let count = insert_blacklist_db(
+            &conn,
+            vec![
+                bl("https://b/2.jpg"),
+                bl_with_thumb("  https://a/1.jpg  ", "  https://t/1.jpg  "),
+                bl("https://b/2.jpg"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        let entries = load_blacklist_db(&conn);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].url, "https://a/1.jpg");
+        assert_eq!(entries[0].thumb_url.as_deref(), Some("https://t/1.jpg"));
+        assert_eq!(entries[1].url, "https://b/2.jpg");
+    }
+
+    #[test]
+    fn insert_blacklist_ignores_blank_urls() {
+        let conn = blacklist_conn();
+        insert_blacklist_db(&conn, vec![bl("   "), bl("")]).unwrap();
+        assert_eq!(count_blacklist_db(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn insert_blacklist_same_url_keeps_existing_row() {
+        let conn = blacklist_conn();
+        insert_blacklist_db(&conn, vec![bl("https://a/1.jpg")]).unwrap();
+        insert_blacklist_db(
+            &conn,
+            vec![bl_with_thumb("https://a/1.jpg", "https://t/1.jpg")],
+        )
+        .unwrap();
+        let entries = load_blacklist_db(&conn);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].thumb_url, None);
+        assert_eq!(count_blacklist_db(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn page_blacklist_returns_sorted_slices() {
+        let conn = blacklist_conn();
+        for i in 0..5 {
+            insert_blacklist_db(&conn, vec![bl(&format!("https://p/{i}.jpg"))]).unwrap();
+        }
+        let first = page_blacklist_db(&conn, "", 2, 0).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].url, "https://p/0.jpg");
+        assert_eq!(first[1].url, "https://p/1.jpg");
+        let second = page_blacklist_db(&conn, "", 2, 2).unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].url, "https://p/2.jpg");
+        let third = page_blacklist_db(&conn, "", 2, 4).unwrap();
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].url, "https://p/4.jpg");
+    }
+
+    #[test]
+    fn page_blacklist_filters_by_keyword() {
+        let conn = blacklist_conn();
+        insert_blacklist_db(
+            &conn,
+            vec![bl("https://x/anime-1.jpg"), bl("https://y/landscape.jpg")],
+        )
+        .unwrap();
+        let hit = page_blacklist_db(&conn, "anime", 10, 0).unwrap();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].url, "https://x/anime-1.jpg");
+        let miss = page_blacklist_db(&conn, "nope", 10, 0).unwrap();
+        assert!(miss.is_empty());
+    }
+
+    #[test]
+    fn delete_blacklist_removes_matching_urls_and_returns_count() {
+        let conn = blacklist_conn();
+        insert_blacklist_db(
+            &conn,
+            vec![
+                bl_with_thumb("https://a/1.jpg", "https://t/1.jpg"),
+                bl("https://b/2.jpg"),
+            ],
+        )
+        .unwrap();
+        let count = delete_blacklist_db(&conn, vec!["https://a/1.jpg".to_string()]).unwrap();
+        assert_eq!(count, 1);
+        let entries = load_blacklist_db(&conn);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].url, "https://b/2.jpg");
+    }
+
+    #[test]
+    fn delete_blacklist_trims_targets_and_ignores_missing() {
+        let conn = blacklist_conn();
+        insert_blacklist_db(&conn, vec![bl("https://a/1.jpg")]).unwrap();
+        let count = delete_blacklist_db(
+            &conn,
+            vec![
+                "  https://a/1.jpg ".to_string(),
+                "https://nope.jpg".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn clear_blacklist_empties_table() {
+        let conn = blacklist_conn();
+        insert_blacklist_db(&conn, vec![bl("https://a/1.jpg")]).unwrap();
+        clear_blacklist_db(&conn).unwrap();
+        assert_eq!(count_blacklist_db(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn migrate_legacy_imports_items_and_urls_then_removes_file() {
+        let conn = blacklist_conn();
+        let removed = std::cell::Cell::new(false);
+        let imported = migrate_legacy_blacklist(
+            &conn,
+            fake_legacy_reader(serde_json::json!({
+                "items": [{"url": "https://a/1.jpg", "thumbUrl": "https://t/1.jpg"}],
+                "urls": ["https://a/1.jpg", "https://b/2.jpg"]
+            })),
+            fake_legacy_remover(&removed),
+        )
+        .unwrap();
+        assert_eq!(imported, 2);
+        assert!(removed.get());
+        assert_eq!(count_blacklist_db(&conn).unwrap(), 2);
+        let entries = load_blacklist_db(&conn);
+        assert_eq!(entries[0].url, "https://a/1.jpg");
+        assert_eq!(entries[0].thumb_url.as_deref(), Some("https://t/1.jpg"));
+        assert_eq!(entries[1].url, "https://b/2.jpg");
+    }
+
+    #[test]
+    fn migrate_legacy_skips_when_db_already_has_data() {
+        let conn = blacklist_conn();
+        insert_blacklist_db(&conn, vec![bl("https://existing.jpg")]).unwrap();
+        let removed = std::cell::Cell::new(false);
+        let imported = migrate_legacy_blacklist(
+            &conn,
+            fake_legacy_reader(serde_json::json!({"urls": ["https://old.jpg"]})),
+            fake_legacy_remover(&removed),
+        )
+        .unwrap();
+        assert_eq!(imported, 0);
+        assert!(!removed.get());
+        assert_eq!(count_blacklist_db(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn migrate_legacy_no_legacy_file_returns_zero() {
+        let conn = blacklist_conn();
+        let removed = std::cell::Cell::new(false);
+        let imported = migrate_legacy_blacklist(
+            &conn,
+            fake_missing_legacy_reader(),
+            fake_legacy_remover(&removed),
+        )
+        .unwrap();
+        assert_eq!(imported, 0);
+        assert!(!removed.get());
+    }
+
+    #[test]
+    fn migrate_legacy_corrupt_or_blank_file_returns_zero() {
+        let conn = blacklist_conn();
+        let imported = migrate_legacy_blacklist(
+            &conn,
+            fake_legacy_reader(serde_json::json!({"items": "bad"})),
+            fake_legacy_remover(&std::cell::Cell::new(false)),
+        )
+        .unwrap();
+        assert_eq!(imported, 0);
+        let blank = migrate_legacy_blacklist(
+            &conn,
+            fake_legacy_reader(serde_json::json!({"items": [], "urls": ["   ", ""]})),
+            fake_legacy_remover(&std::cell::Cell::new(false)),
+        )
+        .unwrap();
+        assert_eq!(blank, 0);
+    }
+
+    #[test]
+    fn count_blacklist_db_missing_table_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(count_blacklist_db(&conn).is_err());
+    }
+
+    #[test]
+    fn page_blacklist_db_missing_table_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(page_blacklist_db(&conn, "", 10, 0).is_err());
+    }
+
+    #[test]
+    fn insert_blacklist_db_missing_table_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(insert_blacklist_db(&conn, vec![bl("https://a/1.jpg")]).is_err());
+    }
+
+    #[test]
+    fn delete_blacklist_db_missing_table_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(delete_blacklist_db(&conn, vec!["https://a/1.jpg".to_string()]).is_err());
+    }
+
+    #[test]
+    fn clear_blacklist_db_missing_table_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(clear_blacklist_db(&conn).is_err());
+    }
+
+    #[test]
+    fn is_blacklisted_matches_exact_url() {
+        let entries = vec![bl("https://a/1.jpg")];
+        assert!(is_blacklisted(&entries, "https://a/1.jpg"));
+        assert!(!is_blacklisted(&entries, "https://other.jpg"));
+        assert!(!is_blacklisted(&entries, " https://a/1.jpg "));
+        assert!(!is_blacklisted(&[], "https://a/1.jpg"));
+    }
+
+    #[test]
+    fn is_blacklisted_blank_target_is_not_listed() {
+        assert!(!is_blacklisted(&[bl("")], ""));
+        assert!(!is_blacklisted(&[bl("u")], "   "));
+    }
+
+    #[test]
+    fn filter_blacklisted_impl_removes_matching_items() {
+        let items = vec![
+            item_with_url("https://a/1.jpg"),
+            item_with_url("https://b/2.jpg"),
+        ];
+        let kept = filter_blacklisted_impl(items, &[bl("https://a/1.jpg")]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].full_url, "https://b/2.jpg");
+    }
+
+    #[test]
+    fn filter_blacklisted_impl_keeps_all_when_blacklist_empty() {
+        let items = vec![item_with_url("https://a/1.jpg")];
+        let kept = filter_blacklisted_impl(items, &[]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].full_url, "https://a/1.jpg");
+    }
+
+    #[derive(Default)]
+    struct MemThumbCache {
+        map: std::cell::RefCell<HashMap<String, String>>,
+    }
+
+    impl BlacklistThumbCache for MemThumbCache {
+        fn get(&self, key: &str) -> Option<String> {
+            self.map.borrow().get(key).cloned()
+        }
+
+        fn put(&self, key: &str, value: String) {
+            self.map.borrow_mut().insert(key.to_string(), value);
+        }
+    }
+
+    /// 黑名单 fake fetcher 返回的 boxed future 类型。
+    type BlacklistThumbFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>>>>;
+
+    /// 可注入的 fake fetcher：`fail=true` 时返回错误，否则返回 url 字节（fallback jpeg）；
+    /// 通过 `calls` 统计被调用次数，供缓存命中测试断言未触发网络。
+    fn fake_thumb_fetcher(
+        calls: Arc<AtomicUsize>,
+        fail: bool,
+    ) -> impl FnOnce(String) -> BlacklistThumbFuture {
+        move |url: String| {
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if fail {
+                    return Err("network down".to_string());
+                }
+                Ok(url.into_bytes())
+            })
+        }
+    }
+
+    #[test]
+    fn fetch_blacklisted_thumb_downloads_builds_url_and_caches() {
+        let cache = MemThumbCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let data_url = tauri::async_runtime::block_on(fetch_blacklisted_thumb_with(
+            fake_thumb_fetcher(calls.clone(), false),
+            &cache,
+            "https://t/1.jpg",
+        ))
+        .unwrap();
+        assert!(data_url.starts_with("data:image/jpeg;base64,"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.get("https://t/1.jpg"), Some(data_url.clone()));
+    }
+
+    #[test]
+    fn fetch_blacklisted_thumb_hits_cache_without_fetching() {
+        let cache = MemThumbCache::default();
+        cache.put(
+            "https://t/1.jpg",
+            "data:image/jpeg;base64,cached".to_string(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let data_url = tauri::async_runtime::block_on(fetch_blacklisted_thumb_with(
+            fake_thumb_fetcher(calls.clone(), false),
+            &cache,
+            "https://t/1.jpg",
+        ))
+        .unwrap();
+        assert_eq!(data_url, "data:image/jpeg;base64,cached");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "cache hit must not fetch");
+    }
+
+    #[test]
+    fn fetch_blacklisted_thumb_propagates_download_error_without_caching() {
+        let cache = MemThumbCache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let err = tauri::async_runtime::block_on(fetch_blacklisted_thumb_with(
+            fake_thumb_fetcher(calls.clone(), true),
+            &cache,
+            "https://t/1.jpg",
+        ))
+        .unwrap_err();
+        assert_eq!(err, "network down");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(cache.get("https://t/1.jpg").is_none());
+    }
+
+    #[test]
+    fn sniff_image_mime_detects_magic_bytes() {
+        assert_eq!(
+            sniff_image_mime(&[0x89, b'P', b'N', b'G', 0x0D]),
+            "image/png"
+        );
+        assert_eq!(sniff_image_mime(b"GIF89a"), "image/gif");
+        assert_eq!(
+            sniff_image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            "image/webp"
+        );
+        assert_eq!(sniff_image_mime(&[0xFF, 0xD8, 0xFF]), "image/jpeg");
+        assert_eq!(sniff_image_mime(b"unknown-bytes"), "image/jpeg");
     }
 }

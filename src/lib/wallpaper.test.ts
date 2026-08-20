@@ -8,29 +8,36 @@ import {
   MAX_CACHE_LIMIT_BYTES,
   MIN_CACHE_LIMIT_BYTES,
   RATIO_OPTIONS,
+  addBlacklistedWallpapers,
   applyWallpaper,
   applyWallpaperToGhosty,
   applyWallpaperToIt,
   bitsToSelections,
+  clearBlacklistedWallpapers,
   clearWallpaperCache,
   deleteLocalWallpapers,
   downloadWallpaper,
+  fetchBlacklistedThumb,
   fetchWallpaperThumb,
   formatFileSize,
   formatModifiedTime,
   generateSeed,
   getWallpaperCacheStats,
   hasWallpaperFullCache,
+  listBlacklistedWallpapers,
+  listBlacklistedWallpaperPage,
   listLocalWallpapers,
   loadWallpaperSettings,
   previewWallpaper,
   readLocalWallpaperFile,
+  removeBlacklistedWallpapers,
   saveWallpaperProxy,
   saveWallpaperSources,
   searchWallpapers,
   selectionsToBits,
   sortByModifiedDesc,
   thumbUrl,
+  type BlacklistEntry,
   type LocalWallpaperInfo,
   type WallpaperItem,
   type WallpaperSettings,
@@ -732,6 +739,100 @@ describe("wallpaper", () => {
       const sorted = sortByModifiedDesc(items);
       expect(sorted.map((i) => i.fileName)).toEqual(["new", "mid", "old"]);
       expect(items.map((i) => i.fileName)).toEqual(["old", "new", "mid"]);
+    });
+  });
+
+  describe("黑名单封装", () => {
+    const entry: BlacklistEntry = {
+      url: "https://full.example/a.jpg",
+      thumbUrl: "https://thumb.example/a.jpg",
+    };
+
+    it("listBlacklistedWallpapers invokes and returns entries", async () => {
+      mockedInvoke.mockResolvedValue([entry]);
+      const list = await listBlacklistedWallpapers();
+      expect(mockedInvoke).toHaveBeenCalledWith("list_blacklisted_wallpapers");
+      expect(list).toEqual([entry]);
+    });
+
+    it("listBlacklistedWallpapers propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("boom"));
+      await expect(listBlacklistedWallpapers()).rejects.toThrow("boom");
+    });
+
+    it("listBlacklistedWallpaperPage invokes with page/pageSize/keyword", async () => {
+      mockedInvoke.mockResolvedValue({ items: [entry], total: 1 });
+      const res = await listBlacklistedWallpaperPage(3, 20, "anime");
+      expect(mockedInvoke).toHaveBeenCalledWith("list_blacklisted_wallpaper_page", {
+        page: 3,
+        pageSize: 20,
+        keyword: "anime",
+      });
+      expect(res).toEqual({ items: [entry], total: 1 });
+    });
+
+    it("listBlacklistedWallpaperPage propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("page fail"));
+      await expect(listBlacklistedWallpaperPage(1, 20, "")).rejects.toThrow(
+        "page fail",
+      );
+    });
+
+    it("addBlacklistedWallpapers invokes with the items payload", async () => {
+      mockedInvoke.mockResolvedValue(1);
+      const result = await addBlacklistedWallpapers([entry]);
+      expect(mockedInvoke).toHaveBeenCalledWith("add_blacklisted_wallpapers", {
+        items: [entry],
+      });
+      expect(result).toBe(1);
+    });
+
+    it("addBlacklistedWallpapers propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("disk full"));
+      await expect(addBlacklistedWallpapers([entry])).rejects.toThrow("disk full");
+    });
+
+    it("removeBlacklistedWallpapers invokes with the urls payload", async () => {
+      mockedInvoke.mockResolvedValue(0);
+      const result = await removeBlacklistedWallpapers([entry.url]);
+      expect(mockedInvoke).toHaveBeenCalledWith("remove_blacklisted_wallpapers", {
+        urls: [entry.url],
+      });
+      expect(result).toBe(0);
+    });
+
+    it("removeBlacklistedWallpapers propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("missing"));
+      await expect(removeBlacklistedWallpapers([entry.url])).rejects.toThrow(
+        "missing",
+      );
+    });
+
+    it("clearBlacklistedWallpapers invokes the clear command", async () => {
+      mockedInvoke.mockResolvedValue(undefined);
+      await clearBlacklistedWallpapers();
+      expect(mockedInvoke).toHaveBeenCalledWith("clear_blacklisted_wallpapers");
+    });
+
+    it("clearBlacklistedWallpapers propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("io"));
+      await expect(clearBlacklistedWallpapers()).rejects.toThrow("io");
+    });
+
+    it("fetchBlacklistedThumb invokes with the url and returns the data url", async () => {
+      mockedInvoke.mockResolvedValue("data:image/jpeg;base64,BLACK");
+      const url = await fetchBlacklistedThumb(entry.thumbUrl ?? "");
+      expect(mockedInvoke).toHaveBeenCalledWith("fetch_blacklisted_thumb", {
+        url: entry.thumbUrl,
+      });
+      expect(url).toBe("data:image/jpeg;base64,BLACK");
+    });
+
+    it("fetchBlacklistedThumb propagates failures", async () => {
+      mockedInvoke.mockRejectedValue(new Error("no thumb"));
+      await expect(fetchBlacklistedThumb("https://nope")).rejects.toThrow(
+        "no thumb",
+      );
     });
   });
 });

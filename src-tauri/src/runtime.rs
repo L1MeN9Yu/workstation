@@ -21,8 +21,8 @@ use crate::{
     read_cmux_config_at, read_cmux_setting_impl, read_config as read_config_impl,
     read_ghosty_config_at, reload_cmux_config_impl,
     wallpaper::{
-        self, DeleteWallpapersResult, LocalWallpaperInfo, SearchQuery, SourceSettings, ThumbState,
-        WallpaperHistoryPage, WallpaperItem, WallpaperSettings,
+        self, BlacklistEntry, DeleteWallpapersResult, LocalWallpaperInfo, SearchQuery,
+        SourceSettings, ThumbState, WallpaperHistoryPage, WallpaperItem, WallpaperSettings,
     },
     write_cmux_config_at, write_cmux_setting_impl, write_config as write_config_impl,
     write_ghosty_config_at, CmuxConfigFile, CmuxReloadStatus, DetectCmuxResult,
@@ -355,6 +355,13 @@ pub async fn search_wallpapers(
     let mut settings = settings.unwrap_or_else(wallpaper_settings_from_config);
     settings.apply_global_proxy(read_global_proxy());
     let items = wallpaper::search_wallpapers(query, settings.clone()).await?;
+    // 先按黑名单过滤再登记缩略图映射与预取：被拉黑的壁纸不展示、不注册、不预取下载缩略图。
+    let blacklist = app
+        .state::<DbState>()
+        .with_conn(|conn| Ok(wallpaper::load_blacklist_db(conn)))
+        .await
+        .unwrap_or_default();
+    let items = wallpaper::filter_blacklisted_impl(items, &blacklist);
     let state = app.state::<ThumbState>();
     state.register(&items);
     let app_handle = app.clone();
@@ -385,14 +392,146 @@ pub async fn search_wallpapers(
 #[tauri::command]
 pub async fn download_wallpaper(app: AppHandle, item: WallpaperItem) -> Result<String, String> {
     let settings = inject_cache_root(&app, wallpaper_settings_from_config());
+    // 防御性拦截：拉黑 URL 不下载、不落本地文件与缓存。
+    let blacklist = app
+        .state::<DbState>()
+        .with_conn(|conn| Ok(wallpaper::load_blacklist_db(conn)))
+        .await
+        .unwrap_or_default();
+    if wallpaper::is_blacklisted(&blacklist, &item.full_url) {
+        return Err("该壁纸已被拉黑，无法下载/预览".to_string());
+    }
     wallpaper::download_wallpaper(item, settings).await
 }
 
 #[tauri::command]
 pub async fn fetch_full_image(app: AppHandle, item: WallpaperItem) -> Result<String, String> {
     let settings = inject_cache_root(&app, wallpaper_settings_from_config());
+    // 防御性拦截：拉黑 URL 的原图预览被拒绝，不发起网络下载也不写缓存。
+    let blacklist = app
+        .state::<DbState>()
+        .with_conn(|conn| Ok(wallpaper::load_blacklist_db(conn)))
+        .await
+        .unwrap_or_default();
+    if wallpaper::is_blacklisted(&blacklist, &item.full_url) {
+        return Err("该壁纸已被拉黑，无法下载/预览".to_string());
+    }
     let (bytes, mime) = wallpaper::fetch_full_image(item, settings).await?;
     Ok(wallpaper::full_image_data_url(&bytes, &mime))
+}
+
+/// 黑名单分页结果：当前页条目与总条数（camelCase 序列化供前端展示）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperBlacklistPage {
+    items: Vec<BlacklistEntry>,
+    total: i64,
+}
+
+/// 查询壁纸黑名单总条数（供分页面板展示总数）。
+#[tauri::command]
+pub async fn count_blacklisted_wallpapers(state: State<'_, DbState>) -> Result<i64, String> {
+    state.with_conn(wallpaper::count_blacklist_db).await
+}
+
+/// 查询壁纸黑名单全量列表（按 url 排序；数据库不可用返回错误）。
+#[tauri::command]
+pub async fn list_blacklisted_wallpapers(
+    state: State<'_, DbState>,
+) -> Result<Vec<BlacklistEntry>, String> {
+    state
+        .with_conn(|conn| Ok(wallpaper::load_blacklist_db(conn)))
+        .await
+}
+
+/// 分页查询黑名单（page 从 1 起，pageSize 每页条数，keyword 为 URL 模糊过滤关键字）。
+#[tauri::command]
+pub async fn list_blacklisted_wallpaper_page(
+    state: State<'_, DbState>,
+    page: i64,
+    page_size: i64,
+    keyword: String,
+) -> Result<WallpaperBlacklistPage, String> {
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 200);
+    let offset = (page - 1) * page_size;
+    state
+        .with_conn(move |conn| {
+            let total = wallpaper::count_blacklist_db(conn)?;
+            let items = wallpaper::page_blacklist_db(conn, &keyword, page_size, offset)?;
+            Ok(WallpaperBlacklistPage { items, total })
+        })
+        .await
+}
+
+/// 添加壁纸到黑名单（url trim + 去重合并，按行插入），返回最新总条数。
+#[tauri::command]
+pub async fn add_blacklisted_wallpapers(
+    items: Vec<BlacklistEntry>,
+    state: State<'_, DbState>,
+) -> Result<i64, String> {
+    state
+        .with_conn(move |conn| wallpaper::insert_blacklist_db(conn, items))
+        .await
+}
+
+/// 从黑名单移除指定 url（按行删除），返回最新总条数。
+#[tauri::command]
+pub async fn remove_blacklisted_wallpapers(
+    urls: Vec<String>,
+    state: State<'_, DbState>,
+) -> Result<i64, String> {
+    state
+        .with_conn(move |conn| wallpaper::delete_blacklist_db(conn, urls))
+        .await
+}
+
+/// 清空壁纸黑名单。
+#[tauri::command]
+pub async fn clear_blacklisted_wallpapers(state: State<'_, DbState>) -> Result<(), String> {
+    state.with_conn(wallpaper::clear_blacklist_db).await
+}
+
+/// 黑名单管理面板缩略图内存缓存适配：独立命名空间缓存 data URL（不写磁盘缓存池）。
+struct BlacklistThumbCacheAdapter;
+
+impl wallpaper::BlacklistThumbCache for BlacklistThumbCacheAdapter {
+    fn get(&self, key: &str) -> Option<String> {
+        crate::app_cache::get::<String>(crate::app_cache::NS_BLACKLIST_THUMBS, key)
+    }
+
+    fn put(&self, key: &str, value: String) {
+        crate::app_cache::insert(crate::app_cache::NS_BLACKLIST_THUMBS, key, value);
+    }
+}
+
+/// 按 URL 拉取黑名单条目的缩略图：经全局代理下载字节并返回 data URL；
+/// 内存缓存按 url 键复用（独立命名空间），不写入统一缩略图缓存池与磁盘。
+#[tauri::command]
+pub async fn fetch_blacklisted_thumb(url: String) -> Result<String, String> {
+    let settings = wallpaper_settings_from_config();
+    let client = wallpaper::build_client(settings.proxy.as_deref())?;
+    let fetcher = move |target: String| {
+        let client = client.clone();
+        async move {
+            let resp = client
+                .get(&target)
+                .send()
+                .await
+                .map_err(|e| format!("blacklisted thumb request failed: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "blacklisted thumb request failed with HTTP {}",
+                    resp.status().as_u16()
+                ));
+            }
+            resp.bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("blacklisted thumb body read failed: {e}"))
+        }
+    };
+    wallpaper::fetch_blacklisted_thumb_with(fetcher, &BlacklistThumbCacheAdapter, &url).await
 }
 
 #[tauri::command]
@@ -556,7 +695,21 @@ pub fn run() {
             app.manage(ThumbState::new(cache_dir));
             // 打开失败不阻塞启动：state 存 None，命令返回错误而非崩溃。
             let db = match crate::db::db_path().and_then(|path| crate::db::open_db(&path)) {
-                Ok(conn) => DbState(Arc::new(Mutex::new(Some(conn)))),
+                Ok(conn) => {
+                    // 一次性迁移旧版 wallpaperBlacklist.json 到 SQLite，成功后删除旧文件。
+                    if let Err(e) = wallpaper::migrate_legacy_blacklist(
+                        &conn,
+                        || crate::read_config("wallpaperBlacklist".to_string()),
+                        || {
+                            if let Ok(p) = crate::config_path("wallpaperBlacklist") {
+                                let _ = std::fs::remove_file(p);
+                            }
+                        },
+                    ) {
+                        log::warn!("failed to migrate legacy wallpaper blacklist: {e}");
+                    }
+                    DbState(Arc::new(Mutex::new(Some(conn))))
+                }
                 Err(e) => {
                     log::error!("wallpaper history database unavailable: {e}");
                     DbState(Arc::new(Mutex::new(None)))
@@ -645,6 +798,13 @@ pub fn run() {
             search_wallpapers,
             download_wallpaper,
             fetch_full_image,
+            list_blacklisted_wallpapers,
+            count_blacklisted_wallpapers,
+            list_blacklisted_wallpaper_page,
+            add_blacklisted_wallpapers,
+            remove_blacklisted_wallpapers,
+            clear_blacklisted_wallpapers,
+            fetch_blacklisted_thumb,
             has_wallpaper_full_cache,
             get_wallpaper_cache_stats,
             clear_wallpaper_cache,

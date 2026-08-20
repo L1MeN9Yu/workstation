@@ -16,19 +16,25 @@ import { WallpaperLibrary } from "./WallpaperLibrary";
 import {
   BIT_GROUPS,
   RATIO_OPTIONS,
+  addBlacklistedWallpapers,
   applyWallpaper,
   bitsToSelections,
+  clearBlacklistedWallpapers,
   downloadWallpaper,
+  fetchBlacklistedThumb,
   generateSeed,
   hasWallpaperFullCache,
+  listBlacklistedWallpaperPage,
   loadWallpaperSettings,
   previewWallpaper,
+  removeBlacklistedWallpapers,
   saveWallpaperProxy,
   saveWallpaperSources,
   searchWallpapers,
   selectionsToBits,
   thumbUrl,
   type ApplyWallpaperTarget,
+  type BlacklistEntry,
   type SourceSettings,
   type WallpaperItem,
   type WallpaperSettings,
@@ -66,6 +72,14 @@ const DRAG_THRESHOLD_PX = 4;
 /** 将缩放值限制在允许范围内 */
 function clampZoom(scale: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+}
+
+/** 复制文本到系统剪贴板：优先 Web Clipboard API，环境不支持时报错 */
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (!navigator.clipboard || !navigator.clipboard.writeText) {
+    throw new Error("当前环境不支持剪贴板");
+  }
+  await navigator.clipboard.writeText(text);
 }
 
 /**
@@ -213,6 +227,59 @@ function ProxiedThumb({ hash, alt, className }: ProxiedThumbProps) {
   );
 }
 
+/** 黑名单管理面板单条缩略图：独立请求 data URL，就绪前骨架脉冲块、失败显示占位 */
+/** 从原图 URL 推断图源标签（wallhaven/Danbooru/Safebooru/其他域名） */
+function blacklistSourceLabel(url: string): string {
+  const host = url.replace(/^[a-z]+:\/\//i, "").split("/")[0].toLowerCase();
+  if (host.includes("wallhaven")) return "wallhaven";
+  if (host.includes("danbooru")) return "Danbooru";
+  if (host.includes("safebooru")) return "Safebooru";
+  return host || "未知";
+}
+
+function BlacklistThumb({ url, alt }: { url: string; alt: string }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchBlacklistedThumb(url)
+      .then((data) => {
+        if (!cancelled) setDataUrl(data);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  if (failed) {
+    return (
+      <div className="flex h-10 w-16 shrink-0 items-center justify-center bg-gray-100 text-[10px] text-gray-400 dark:bg-gray-800 dark:text-gray-500">
+        加载失败
+      </div>
+    );
+  }
+  if (!dataUrl) {
+    return (
+      <div
+        role="status"
+        aria-label={`加载缩略图 ${alt}`}
+        className="h-10 w-16 shrink-0 animate-pulse bg-gray-200 dark:bg-gray-700"
+      />
+    );
+  }
+  return (
+    <img
+      src={dataUrl}
+      alt={alt}
+      className="h-10 w-16 shrink-0 rounded object-cover"
+    />
+  );
+}
+
 type FieldType = "text" | "checkbox" | "select" | "number" | "seed" | "multiselect";
 
 interface SourceFieldDef {
@@ -293,6 +360,22 @@ export default function WallpaperTool() {
   const [errors, setErrors] = useState<SearchError[]>([]);
   const [settings, setSettings] = useState<WallpaperSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showBlacklist, setShowBlacklist] = useState(false);
+  const [blacklist, setBlacklist] = useState<BlacklistEntry[]>([]);
+  const [blacklistTotal, setBlacklistTotal] = useState(0);
+  const [blacklistPage, setBlacklistPage] = useState(1);
+  const [blacklistKeyword, setBlacklistKeyword] = useState("");
+  const [blacklistLoading, setBlacklistLoading] = useState(false);
+  /** 当前展开「更多操作」菜单的卡片 id；null 表示未展开 */
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+
+  /** 黑名单每页条数（分页展示避免长列表卡顿） */
+  const BLACKLIST_PAGE_SIZE = 20;
+  /** 黑名单总页数（至少 1 页） */
+  const blacklistPageCount = Math.max(
+    1,
+    Math.ceil(blacklistTotal / BLACKLIST_PAGE_SIZE),
+  );
   const [applyingId, setApplyingId] = useState<string | null>(null);
   /** 本次应用目标（单次切换，不持久化） */
   const [applyTarget, setApplyTarget] = useState<ApplyWallpaperTarget>("cmux");
@@ -562,6 +645,21 @@ export default function WallpaperTool() {
     };
   }, []);
 
+  // 卡片「更多操作」菜单：点击外部或按 Esc 关闭（菜单按钮自身 stopPropagation 不会触发关闭）
+  useEffect(() => {
+    if (openMenuId === null) return;
+    const close = () => setOpenMenuId(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenMenuId(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [openMenuId]);
+
   function scheduleSourceSave(
     sources: WallpaperSettings["sources"],
   ): void {
@@ -728,6 +826,115 @@ export default function WallpaperTool() {
     }
   }
 
+  /**
+   * 拉黑一张壁纸：后端写入成功后从当前列表即时移除并适配预览索引
+   * （被删项在当前预览索引之前则索引 -1；删除的是当前预览项则关闭预览），
+   * 失败保持列表不变。
+   */
+  async function handleBlacklist(item: WallpaperItem): Promise<void> {
+    try {
+      await addBlacklistedWallpapers([
+        { url: item.full_url, thumbUrl: item.thumb_url },
+      ]);
+      const removedIndex = items.findIndex(
+        (it) => it.full_url === item.full_url,
+      );
+      setItems((prev) => prev.filter((it) => it.full_url !== item.full_url));
+      if (previewIndex !== null) {
+        if (removedIndex === previewIndex) {
+          setPreviewIndex(null);
+        } else if (removedIndex < previewIndex) {
+          setPreviewIndex(previewIndex - 1);
+        }
+      }
+      toast.success("已加入黑名单");
+    } catch (e) {
+      toast.error(`拉黑失败：${String(e)}`);
+    }
+  }
+
+  /** 复制壁纸原图 URL 到剪贴板 */
+  async function handleCopyUrl(item: WallpaperItem): Promise<void> {
+    try {
+      await copyTextToClipboard(item.full_url);
+      toast.success("已复制原图 URL");
+    } catch (e) {
+      toast.error(`复制失败：${String(e)}`);
+    }
+  }
+
+  /** 打开黑名单管理面板并拉取第 1 页；加载失败提示并关闭面板 */
+  async function handleOpenBlacklist(): Promise<void> {
+    setShowBlacklist(true);
+    setBlacklistKeyword("");
+    try {
+      const res = await listBlacklistedWallpaperPage(1, BLACKLIST_PAGE_SIZE, "");
+      setBlacklist(res.items);
+      setBlacklistTotal(res.total);
+      setBlacklistPage(1);
+    } catch (e) {
+      toast.error(`加载黑名单失败：${String(e)}`);
+      setShowBlacklist(false);
+    }
+  }
+
+  /** 按关键词加载黑名单第 page 页（页码/关键词变化时重新拉取） */
+  async function loadBlacklistPage(page: number, keyword: string): Promise<void> {
+    setBlacklistLoading(true);
+    try {
+      const res = await listBlacklistedWallpaperPage(
+        page,
+        BLACKLIST_PAGE_SIZE,
+        keyword,
+      );
+      setBlacklist(res.items);
+      setBlacklistTotal(res.total);
+      setBlacklistPage(page);
+    } catch (e) {
+      toast.error(`加载黑名单失败：${String(e)}`);
+    } finally {
+      setBlacklistLoading(false);
+    }
+  }
+
+  /** 搜索框输入：回到第 1 页并按关键词过滤 */
+  function handleBlacklistSearch(value: string): void {
+    setBlacklistKeyword(value);
+    void loadBlacklistPage(1, value);
+  }
+
+  /** 翻页（越界忽略） */
+  function goBlacklistPage(page: number): void {
+    if (page < 1 || page > blacklistPageCount) return;
+    void loadBlacklistPage(page, blacklistKeyword);
+  }
+
+  /** 移除单条黑名单：刷新当前页并提示；当前已加载搜索结果保持不变 */
+  async function handleRemoveBlacklist(url: string): Promise<void> {
+    try {
+      await removeBlacklistedWallpapers([url]);
+      toast.success("已移除，重新搜索后可见");
+      await loadBlacklistPage(blacklistPage, blacklistKeyword);
+    } catch (e) {
+      toast.error(`移除黑名单失败：${String(e)}`);
+    }
+  }
+
+  /** 清空全部黑名单（二次确认） */
+  async function handleClearBlacklist(): Promise<void> {
+    const ok = await confirmDialog("确认清空全部黑名单？此操作不可恢复。");
+    if (!ok) return;
+    try {
+      await clearBlacklistedWallpapers();
+      setBlacklist([]);
+      setBlacklistTotal(0);
+      setBlacklistPage(1);
+      toast.success("黑名单已清空");
+    } catch (e) {
+      toast.error(`清空黑名单失败：${String(e)}`);
+    }
+  }
+
   /** 本地库应用 iTerm2 但未配置 Profile 时：打开设置面板并提示 */
   function handleRequireProfile(): void {
     setShowSettings(true);
@@ -854,12 +1061,23 @@ export default function WallpaperTool() {
             本地壁纸库
           </button>
         </div>
-        <button
-          onClick={() => setShowSettings((v) => !v)}
-          className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white"
-        >
-          设置
-        </button>
+        <div className="flex gap-2">
+          {view === "search" && (
+            <button
+              onClick={() => void handleOpenBlacklist()}
+              className="rounded-md bg-gray-200 px-3 py-1 text-sm text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+              type="button"
+            >
+              黑名单
+            </button>
+          )}
+          <button
+            onClick={() => setShowSettings((v) => !v)}
+            className="rounded-md bg-accent-600 px-3 py-1 text-sm text-white"
+          >
+            设置
+          </button>
+        </div>
       </div>
 
       {view === "search" && (
@@ -1258,8 +1476,52 @@ export default function WallpaperTool() {
             <div
               key={item.id}
               onClick={() => void openPreview(index)}
-              className="cursor-pointer overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
+              className="relative cursor-pointer overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
+              <div className="absolute right-1.5 top-1.5 z-10">
+                <button
+                  type="button"
+                  aria-label={`更多操作 ${item.id}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setOpenMenuId((cur) => (cur === item.id ? null : item.id));
+                  }}
+                  className="rounded-md bg-black/50 px-1.5 py-0.5 text-sm leading-none text-white hover:bg-black/70"
+                >
+                  ⋯
+                </button>
+                {openMenuId === item.id && (
+                  <div
+                    className="absolute right-0 top-7 z-20 min-w-28 overflow-hidden rounded-md border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900"
+                    role="menu"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenuId(null);
+                        void handleBlacklist(item);
+                      }}
+                      className="block w-full px-3 py-1 text-left text-xs text-red-600 hover:bg-gray-100 dark:text-red-400 dark:hover:bg-gray-800"
+                    >
+                      拉黑
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenuId(null);
+                        void handleCopyUrl(item);
+                      }}
+                      className="block w-full px-3 py-1 text-left text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800"
+                    >
+                      复制 URL
+                    </button>
+                  </div>
+                )}
+              </div>
               <ProxiedThumb
                 hash={item.thumb_hash}
                 alt={item.id}
@@ -1472,6 +1734,124 @@ export default function WallpaperTool() {
             >
               {applyingId === previewItem.id ? "应用中..." : "下载并应用"}
             </button>
+            <button
+              onClick={() => void handleBlacklist(previewItem)}
+              className="rounded-md bg-red-600 px-2 py-1 text-white hover:bg-red-500"
+              type="button"
+            >
+              拉黑
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showBlacklist && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="壁纸黑名单"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowBlacklist(false);
+          }}
+        >
+          <div className="w-full max-w-lg overflow-hidden rounded-lg bg-white shadow-xl dark:bg-gray-900">
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+              <span className="text-sm font-medium">壁纸黑名单</span>
+              <span className="text-xs text-gray-500" aria-label="黑名单总数">
+                共 {blacklistTotal} 条
+              </span>
+              <button
+                onClick={() => setShowBlacklist(false)}
+                aria-label="关闭黑名单"
+                className="rounded-md px-2 py-0.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-300"
+                type="button"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+              <input
+                value={blacklistKeyword}
+                onChange={(e) => handleBlacklistSearch(e.target.value)}
+                placeholder="按 URL 搜索..."
+                aria-label="搜索黑名单"
+                className="w-full rounded-md border border-gray-300 bg-gray-50 px-2 py-1 text-sm dark:border-gray-600 dark:bg-gray-900"
+              />
+            </div>
+            <ul className="max-h-72 divide-y divide-gray-100 overflow-y-auto dark:divide-gray-800">
+              {blacklist.length === 0 ? (
+                <li className="px-4 py-6 text-center text-sm text-gray-500">
+                  {blacklistLoading ? "加载中..." : "暂无黑名单"}
+                </li>
+              ) : (
+                blacklist.map((entry) => (
+                  <li
+                    key={entry.url}
+                    className="flex items-center gap-3 px-4 py-2"
+                  >
+                    {entry.thumbUrl && (
+                      <BlacklistThumb url={entry.thumbUrl} alt={entry.url} />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <span className="mb-0.5 inline-block rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-gray-800 dark:text-gray-300">
+                        {blacklistSourceLabel(entry.url)}
+                      </span>
+                      <div
+                        className="truncate text-xs text-gray-600 dark:text-gray-300"
+                        title={entry.url}
+                      >
+                        {entry.url}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => void handleRemoveBlacklist(entry.url)}
+                      className="shrink-0 rounded-md bg-gray-200 px-2 py-0.5 text-xs text-gray-700 hover:bg-red-100 hover:text-red-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-red-900/40 dark:hover:text-red-400"
+                      type="button"
+                    >
+                      移除
+                    </button>
+                  </li>
+                ))
+              )}
+            </ul>
+            <div className="flex items-center justify-between border-t border-gray-200 px-4 py-2 dark:border-gray-700">
+              <button
+                onClick={() => void handleClearBlacklist()}
+                className="rounded-md bg-red-600 px-3 py-1 text-sm text-white hover:bg-red-500"
+                type="button"
+              >
+                清空全部
+              </button>
+              <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                <button
+                  onClick={() => goBlacklistPage(blacklistPage - 1)}
+                  disabled={blacklistPage <= 1}
+                  className="rounded-md bg-gray-200 px-2 py-0.5 text-gray-700 disabled:opacity-40 dark:bg-gray-700 dark:text-gray-200"
+                  type="button"
+                >
+                  上一页
+                </button>
+                <span aria-label="黑名单页码">
+                  第 {blacklistPage} / {blacklistPageCount} 页
+                </span>
+                <button
+                  onClick={() => goBlacklistPage(blacklistPage + 1)}
+                  disabled={blacklistPage >= blacklistPageCount}
+                  className="rounded-md bg-gray-200 px-2 py-0.5 text-gray-700 disabled:opacity-40 dark:bg-gray-700 dark:text-gray-200"
+                  type="button"
+                >
+                  下一页
+                </button>
+              </div>
+              <button
+                onClick={() => setShowBlacklist(false)}
+                className="rounded-md bg-gray-200 px-3 py-1 text-sm text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
           </div>
         </div>
       )}

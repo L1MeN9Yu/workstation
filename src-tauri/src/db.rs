@@ -16,6 +16,11 @@ pub const MIGRATIONS: &[&str] = &[
        PRIMARY KEY (source, keyword)
      );
      CREATE INDEX idx_history_updated ON wallpaper_search_history (source, updated_at DESC);",
+    // 迁移 2：壁纸黑名单表（url 主键去重，thumb_url 仅供管理面板展示）。
+    "CREATE TABLE wallpaper_blacklist (
+       url       TEXT NOT NULL PRIMARY KEY,
+       thumb_url TEXT
+     );",
 ];
 
 /// 解析数据库文件路径：`config_dir.join("workstation.db")`。
@@ -114,6 +119,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexes, 1);
+        let blacklist: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='wallpaper_blacklist'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blacklist, 1);
     }
 
     #[test]
