@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::{StreamExt, TryStreamExt};
@@ -1144,6 +1144,8 @@ pub struct ThumbState {
     dir: PathBuf,
     registry: RwLock<HashMap<String, String>>,
     index: RwLock<ThumbIndex>,
+    /// 正在拉取的 hash 集合：防止同一 hash 被并发重复下载（prefetch 与协议 miss 重试可能同发）。
+    inflight: Mutex<HashSet<String>>,
 }
 
 impl ThumbState {
@@ -1153,6 +1155,7 @@ impl ThumbState {
             dir,
             registry: RwLock::new(HashMap::new()),
             index: RwLock::new(index),
+            inflight: Mutex::new(HashSet::new()),
         }
     }
 
@@ -1167,6 +1170,11 @@ impl ThumbState {
 
     pub fn resolve(&self, hash: &str) -> Option<String> {
         self.registry.read().unwrap().get(hash).cloned()
+    }
+
+    /// 该 hash 是否正有下载在进行中（prefetch / 协议 miss 重试并发去重）。
+    pub fn in_flight(&self, hash: &str) -> bool {
+        self.inflight.lock().unwrap().contains(hash)
     }
 
     /// 供协议读取：命中缓存时刷新文件 mtime（保持 LRU 热度）以配合文件级统一LRU。
@@ -1187,6 +1195,9 @@ impl ThumbState {
         Some((bytes, mime_for_ext(&entry.ext)))
     }
 
+    /// 命中缓存直接返回；未缓存时加锁去重后触发一次真实网络下载。
+    /// 同一 hash 已有下载在途时返回 "already in progress"（不重复请求），
+    /// 由发起方（协议 miss 重试或 prefetch）负责最终落盘。
     pub async fn get_or_fetch(
         &self,
         hash: &str,
@@ -1195,6 +1206,24 @@ impl ThumbState {
         if let Some(hit) = self.cached(hash) {
             return Ok(hit);
         }
+        {
+            let mut inflight = self.inflight.lock().unwrap();
+            if inflight.contains(hash) {
+                return Err("thumb download already in progress".to_string());
+            }
+            inflight.insert(hash.to_string());
+        }
+        let result = self.fetch_unchecked(hash, settings).await;
+        self.inflight.lock().unwrap().remove(hash);
+        result
+    }
+
+    /// 无并发保护的真实下载实现（调用方需先经 `get_or_fetch` 去重）。
+    async fn fetch_unchecked(
+        &self,
+        hash: &str,
+        settings: &WallpaperSettings,
+    ) -> Result<(Vec<u8>, &'static str), String> {
         let url = self
             .resolve(hash)
             .ok_or_else(|| "unknown thumb hash".to_string())?;
@@ -2200,6 +2229,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unknown thumb hash"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_or_fetch_dedupes_inflight_downloads() {
+        let server = MockServer::new(vec![
+            (200, "dup-bytes", "image/jpeg"),
+            (200, "second-call", "image/jpeg"),
+        ]);
+        let dir = temp_cache_dir("inflight");
+        let url = format!("{}/img", server.base_url());
+        let state = state_with(&dir, &url);
+        let hash = thumb_hash(&url);
+        // 预置 in-flight 标记：第二个调用应直接返回 already in progress，不再发网络请求。
+        state.inflight.lock().unwrap().insert(hash.clone());
+        assert!(state.in_flight(&hash));
+        let err = tauri::async_runtime::block_on(state.get_or_fetch(&hash, &empty_settings()))
+            .unwrap_err();
+        assert!(err.contains("already in progress"));
+        assert_eq!(server.hit_count(), 0, "no network request on dedupe");
+        // 释放 in-flight 后第三次调用走真实网络下载成功。
+        state.inflight.lock().unwrap().remove(&hash);
+        assert!(!state.in_flight(&hash));
+        let (bytes, _mime) =
+            tauri::async_runtime::block_on(state.get_or_fetch(&hash, &empty_settings())).unwrap();
+        assert_eq!(bytes, b"dup-bytes");
+        assert_eq!(server.hit_count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
