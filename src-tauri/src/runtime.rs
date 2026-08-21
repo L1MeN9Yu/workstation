@@ -375,8 +375,11 @@ pub async fn search_wallpapers(
                 let hash = item.thumb_hash.clone();
                 tasks.push(tauri::async_runtime::spawn(async move {
                     let state = app_handle.state::<ThumbState>();
-                    if let Err(e) = state.get_or_fetch(&hash, &settings).await {
-                        log::error!("thumb prefetch failed (hash={hash}): {e}");
+                    match state.get_or_fetch(&hash, &settings).await {
+                        Ok(_) => {
+                            let _ = app_handle.emit("thumb-ready", &hash);
+                        }
+                        Err(e) => log::error!("thumb prefetch failed (hash={hash}): {e}"),
                     }
                 }));
             }
@@ -384,7 +387,6 @@ pub async fn search_wallpapers(
                 let _ = task.await;
             }
         }
-        let _ = app_handle.emit("thumb-ready", ());
     });
     Ok(items)
 }
@@ -755,7 +757,7 @@ pub fn run() {
                     let settings = wallpaper_settings_from_config();
                     match state.get_or_fetch(&hash, &settings).await {
                         Ok(_) => {
-                            let _ = handle.emit("thumb-ready", ());
+                            let _ = handle.emit("thumb-ready", &hash);
                         }
                         Err(e) if e.contains("already in progress") => {
                             // 并发下他人已接管下载，其完成时会 emit，无需在此重复处理。
