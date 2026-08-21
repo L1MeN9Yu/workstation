@@ -15,6 +15,7 @@ coverage
 
 # Local code index and AI tooling files (kept locally, NOT tracked in git)
 .codegraph/
+.codex/
 .opencode/
 .vscode/
 openspec/
