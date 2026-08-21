@@ -30,11 +30,14 @@ import {
 import { confirmDialog } from "../../lib/confirm";
 
 const { readyCallbackRef } = vi.hoisted(() => ({
-  readyCallbackRef: { current: () => {} },
+  // 初始为占位，会在 mock 的 listen 中被真实回调覆盖
+  readyCallbackRef: {
+    current: undefined as unknown as (evt?: { payload?: unknown }) => void,
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn((_event: string, cb: () => void) => {
+  listen: vi.fn((_eventName: string, cb: (e: unknown) => void) => {
     readyCallbackRef.current = cb;
     return Promise.resolve(() => {});
   }),
@@ -347,7 +350,7 @@ describe("WallpaperTool", () => {
     expect(img.className).toContain("opacity-100");
   });
 
-  it("refreshes thumbs when thumb-ready event fires", async () => {
+  it("refreshes the matching thumbnail when its thumb-ready event fires", async () => {
     vi.mocked(searchWallpapers).mockResolvedValue([
       {
         id: "wallhaven-abc",
@@ -370,11 +373,81 @@ describe("WallpaperTool", () => {
       "thumb://0123456789abcdef",
     );
     act(() => {
-      readyCallbackRef.current();
+      readyCallbackRef.current({ payload: "0123456789abcdef" });
     });
     expect(container.querySelector("img")?.getAttribute("src")).toBe(
       "thumb://0123456789abcdef?r=0&v=1",
     );
+  });
+
+  it("ignores empty thumb-ready payload without refreshing", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-empty",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/e.jpg",
+        thumb_hash: "empty0000000000",
+        full_url: "https://full.example/e.jpg",
+        width: 1920,
+        height: 1080,
+      },
+    ]);
+    await flush();
+    const searchBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "搜索",
+    )!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "thumb://empty0000000000",
+    );
+    act(() => {
+      readyCallbackRef.current({});
+    });
+    const img = container.querySelector("img");
+    expect(img?.getAttribute("src")).toBe("thumb://empty0000000000");
+  });
+
+  it("only refreshes the card whose hash matches thumb-ready payload", async () => {
+    vi.mocked(searchWallpapers).mockResolvedValue([
+      {
+        id: "wallhaven-abc",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/a.jpg",
+        thumb_hash: "aaa",
+        full_url: "https://full.example/a.jpg",
+        width: 1920,
+        height: 1080,
+      },
+      {
+        id: "wallhaven-def",
+        source: "wallhaven",
+        thumb_url: "https://thumb.example/b.jpg",
+        thumb_hash: "bbb",
+        full_url: "https://full.example/b.jpg",
+        width: 2560,
+        height: 1440,
+      },
+    ]);
+    await flush();
+    const searchBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "搜索",
+    )!;
+    await act(async () => {
+      searchBtn.click();
+    });
+    const imgs = Array.from(container.querySelectorAll("img"));
+    expect(imgs.map((i) => i.getAttribute("src"))).toEqual([
+      "thumb://aaa",
+      "thumb://bbb",
+    ]);
+    act(() => {
+      readyCallbackRef.current({ payload: "aaa" });
+    });
+    const after = Array.from(container.querySelectorAll("img"));
+    expect(after[0]?.getAttribute("src")).toBe("thumb://aaa?r=0&v=1");
+    expect(after[1]?.getAttribute("src")).toBe("thumb://bbb");
   });
 
   it("shows failure placeholder after retries exhausted and supports manual retry", async () => {
@@ -2655,6 +2728,239 @@ describe("WallpaperTool", () => {
       ) as HTMLElement;
       expect(positionText(dialog2)).toBe("1 / 1");
       expect(dialog.textContent).toContain("1920×1080");
+    });
+  });
+
+  describe("右键菜单", () => {
+    function searchBtn(): HTMLButtonElement {
+      return Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "搜索",
+      )!;
+    }
+
+    async function searchResults(results: WallpaperItem[]): Promise<void> {
+      vi.mocked(searchWallpapers).mockResolvedValue(results);
+      await flush();
+      await act(async () => {
+        searchBtn().click();
+      });
+      await flush();
+    }
+
+    function cards(): NodeListOf<HTMLElement> {
+      return container.querySelectorAll(
+        ".overflow-hidden.rounded-lg.cursor-pointer",
+      );
+    }
+
+    function contextMenu(card: HTMLElement): HTMLElement | undefined {
+      return Array.from(card.querySelectorAll('[role="menu"]')).find(
+        (m) => m.className.includes("fixed"),
+      ) as HTMLElement | undefined;
+    }
+
+    function menuItem(card: HTMLElement, text: string): HTMLButtonElement {
+      return Array.from(card.querySelectorAll("[role='menuitem']")).find(
+        (b) => b.textContent === text,
+      ) as HTMLButtonElement;
+    }
+
+    /** 对卡片触发一次右键事件：preventDefault + clientX/clientY */
+    function rightClick(
+      card: HTMLElement,
+      x: number,
+      y: number,
+    ): { defaultPrevented: boolean } {
+      let defaultPrevented = false;
+      const event = new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      });
+      event.preventDefault = () => {
+        defaultPrevented = true;
+      };
+      act(() => {
+        card.dispatchEvent(event);
+      });
+      return { defaultPrevented };
+    }
+
+    it("缩略图上右键弹出固定菜单并拦截原生菜单", async () => {
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      const prevented = rightClick(firstCard, 300, 300);
+      await flush();
+      expect(prevented.defaultPrevented).toBe(true);
+      expect(contextMenu(firstCard)).toBeTruthy();
+    });
+
+    it("卡片空白处右键同样弹出菜单", async () => {
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 400, 400);
+      await flush();
+      expect(contextMenu(firstCard)).toBeTruthy();
+    });
+
+    it("右键菜单在光标处弹出且四合一动作一致", async () => {
+      vi.mocked(applyWallpaper).mockResolvedValue({
+        target: "cmux",
+        imagePath: "/tmp/wall.jpg",
+        reloadMessage: "reload ok",
+      });
+      vi.mocked(downloadWallpaper).mockResolvedValue("/tmp/wall.jpg");
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 120, 130);
+      await flush();
+      const menu = contextMenu(firstCard)!;
+      const style = menu.getAttribute("style") ?? "";
+      expect(style).toContain("left: 120px");
+      expect(style).toContain("top: 130px");
+      // 「⋯」与右键菜单共享动作：预览打开查看器
+      await act(async () => {
+        menuItem(firstCard, "预览大图").click();
+      });
+      await flush();
+      expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    });
+
+    it("右键菜单在视口边缘内收敛不溢出", async () => {
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 999999, 999999);
+      await flush();
+      const menu = contextMenu(firstCard)!;
+      const style = menu.getAttribute("style") ?? "";
+      const left = Number(style.match(/left: (-?\d+)px/)?.[1]);
+      const top = Number(style.match(/top: (-?\d+)px/)?.[1]);
+      expect(left).toBeLessThanOrEqual(window.innerWidth);
+      expect(top).toBeLessThanOrEqual(window.innerHeight);
+    });
+
+    it("右键菜单点击下载并应用：触发 download+apply", async () => {
+      vi.mocked(applyWallpaper).mockResolvedValue({
+        target: "cmux",
+        imagePath: "/tmp/wall.jpg",
+        reloadMessage: "reload ok",
+      });
+      vi.mocked(downloadWallpaper).mockResolvedValue("/tmp/wall.jpg");
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 300, 300);
+      await flush();
+      await act(async () => {
+        menuItem(firstCard, "下载并应用").click();
+      });
+      await flush();
+      expect(downloadWallpaper).toHaveBeenCalledWith(PREVIEW_ITEM);
+      expect(applyWallpaper).toHaveBeenCalledWith("/tmp/wall.jpg", "cmux", "");
+    });
+
+    it("右键菜单点击复制 URL：复制并 toast", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(window.navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+      try {
+        await searchResults([PREVIEW_ITEM]);
+        const firstCard = cards()[0];
+        rightClick(firstCard, 300, 300);
+        await flush();
+        await act(async () => {
+          menuItem(firstCard, "复制 URL").click();
+        });
+        await flush();
+        expect(writeText).toHaveBeenCalledWith(PREVIEW_ITEM.full_url);
+        expect(toast.success).toHaveBeenCalledWith("已复制原图 URL");
+      } finally {
+        delete (window.navigator as { clipboard?: unknown }).clipboard;
+      }
+    });
+
+    it("右键菜单点击拉黑：移除卡片并 toast，不打开预览", async () => {
+      vi.mocked(addBlacklistedWallpapers).mockResolvedValue(1);
+      await searchResults([PREVIEW_ITEM, PREVIEW_ITEM_2]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 300, 300);
+      await flush();
+      await act(async () => {
+        menuItem(firstCard, "拉黑").click();
+      });
+      await flush();
+      expect(addBlacklistedWallpapers).toHaveBeenCalledWith([
+        { url: PREVIEW_ITEM.full_url, thumbUrl: PREVIEW_ITEM.thumb_url },
+      ]);
+      expect(toast.success).toHaveBeenCalledWith("已加入黑名单");
+      expect(cards().length).toBe(1);
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("菜单打开时点击卡片关闭菜单且不触发预览", async () => {
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 300, 300);
+      await flush();
+      expect(contextMenu(firstCard)).toBeTruthy();
+      await act(async () => {
+        firstCard.click();
+      });
+      await flush();
+      expect(contextMenu(firstCard)).toBeUndefined();
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("按 Esc 关闭右键菜单", async () => {
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 300, 300);
+      await flush();
+      expect(contextMenu(firstCard)).toBeTruthy();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      });
+      await flush();
+      expect(contextMenu(firstCard)).toBeUndefined();
+    });
+
+    it("页面滚动关闭右键菜单", async () => {
+      await searchResults([PREVIEW_ITEM]);
+      const firstCard = cards()[0];
+      rightClick(firstCard, 300, 300);
+      await flush();
+      expect(contextMenu(firstCard)).toBeTruthy();
+      await act(async () => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+      await flush();
+      expect(contextMenu(firstCard)).toBeUndefined();
+    });
+
+    it("同时只保留一个菜单实例：打开另一张卡片的右键菜单关闭前一张", async () => {
+      await searchResults([PREVIEW_ITEM, PREVIEW_ITEM_2]);
+      const [firstCard, secondCard] = cards();
+      rightClick(firstCard, 300, 300);
+      await flush();
+      expect(contextMenu(firstCard)).toBeTruthy();
+      rightClick(secondCard, 300, 300);
+      await flush();
+      expect(contextMenu(firstCard)).toBeUndefined();
+      expect(contextMenu(secondCard)).toBeTruthy();
+    });
+
+    it("卡片外右键不拦截（不弹菜单）", async () => {
+      await searchResults([PREVIEW_ITEM]);
+      const grid = container.querySelector(".grid.grid-cols-2") as HTMLElement;
+      act(() => {
+        grid.dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+      });
+      await flush();
+      expect(container.querySelector('[role="menu"]')).toBeNull();
     });
   });
 

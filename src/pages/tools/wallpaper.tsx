@@ -69,6 +69,23 @@ const MAX_SCALE = 5;
 /** 拖拽超过该距离（px）才视为平移，用于抑制拖拽结束后的 click 关闭 */
 const DRAG_THRESHOLD_PX = 4;
 
+/** 卡片菜单预估尺寸（宽×高，px）：用于右键菜单弹出位置视口收敛 */
+const CARD_MENU_WIDTH = 112;
+const CARD_MENU_HEIGHT = 132;
+
+/** 将右键菜单左上角限制在视口内，避免超出窗口边界（光标贴近边缘时内移） */
+function clampMenuPosition(
+  x: number,
+  y: number,
+): { left: number; top: number } {
+  const vw = typeof window !== "undefined" ? window.innerWidth : 0;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 0;
+  return {
+    left: Math.max(0, Math.min(x, vw - CARD_MENU_WIDTH)),
+    top: Math.max(0, Math.min(y, vh - CARD_MENU_HEIGHT)),
+  };
+}
+
 /** 将缩放值限制在允许范围内 */
 function clampZoom(scale: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
@@ -112,23 +129,38 @@ function clampOffsetToViewport(
   };
 }
 
-const thumbReadyListeners = new Set<() => void>();
-let thumbReadyVersion = 0;
+/** 每个 hash 的缩略图就绪版本号：后端按 hash 广播，前端只刷新对应缩略图 */
+const thumbReadyListeners = new Map<string, Set<() => void>>();
+const thumbReadyVersions = new Map<string, number>();
 
-function subscribeThumbReady(listener: () => void): () => void {
-  thumbReadyListeners.add(listener);
+function subscribeThumbReady(hash: string, listener: () => void): () => void {
+  let set = thumbReadyListeners.get(hash);
+  if (!set) {
+    set = new Set();
+    thumbReadyListeners.set(hash, set);
+  }
+  set.add(listener);
   return () => {
-    thumbReadyListeners.delete(listener);
+    set.delete(listener);
+    if (set.size === 0) {
+      thumbReadyListeners.delete(hash);
+    }
   };
 }
 
-function getThumbReadyVersion(): number {
-  return thumbReadyVersion;
+function getThumbReadyVersion(hash: string): number {
+  return thumbReadyVersions.get(hash) ?? 0;
 }
 
-void listen("thumb-ready", () => {
-  thumbReadyVersion += 1;
-  for (const listener of thumbReadyListeners) listener();
+void listen<string>("thumb-ready", (event) => {
+  const hash = event?.payload;
+  // 旧版空载荷广播不携带 hash，忽略以免触发全局重挂载
+  if (typeof hash !== "string" || !hash) return;
+  thumbReadyVersions.set(hash, (thumbReadyVersions.get(hash) ?? 0) + 1);
+  const set = thumbReadyListeners.get(hash);
+  if (set) {
+    for (const listener of [...set]) listener();
+  }
 }).catch(() => {
   // 非 Tauri 环境（测试）下静默忽略
 });
@@ -174,9 +206,9 @@ function ProxiedThumb({ hash, alt, className }: ProxiedThumbProps) {
   const [attempt, setAttempt] = useState(0);
   const retryTimer = useRef<number | null>(null);
   const readyVersion = useSyncExternalStore(
-    subscribeThumbReady,
-    getThumbReadyVersion,
-    getThumbReadyVersion,
+    (listener) => subscribeThumbReady(hash, listener),
+    () => getThumbReadyVersion(hash),
+    () => getThumbReadyVersion(hash),
   );
 
   useEffect(() => {
@@ -223,6 +255,118 @@ function ProxiedThumb({ hash, alt, className }: ProxiedThumbProps) {
           }, THUMB_RETRY_MS);
         }}
       />
+    </div>
+  );
+}
+
+/** 右键菜单的「下载并应用」进行中状态文案 */
+const APPLYING_TEXT = "应用中...";
+
+interface CardMenuProps {
+  item: WallpaperItem;
+  applying: boolean;
+  mode: "button" | "context";
+  x: number;
+  y: number;
+  onClose: () => void;
+  onPreview: (item: WallpaperItem) => void;
+  onApply: (item: WallpaperItem) => void;
+  onCopyUrl: (item: WallpaperItem) => void;
+  onBlacklist: (item: WallpaperItem) => void;
+}
+
+/** 卡片菜单通用按钮文字样式（危险项用红色） */
+const MENU_INNER_CLASS =
+  "block w-full px-3 py-1 text-left text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800";
+const MENU_DANGER_CLASS =
+  "block w-full px-3 py-1 text-left text-xs text-red-600 hover:bg-gray-100 dark:text-red-400 dark:hover:bg-gray-800";
+
+/** 脚手架的容器样式，接受绝对/固定两种定位的差集 */
+function cardMenuContainerClass(mode: "button" | "context"): string {
+  const base =
+    "min-w-28 overflow-hidden rounded-md border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900";
+  return mode === "button"
+    ? `absolute right-0 top-7 z-20 ${base}`
+    : `${base}`;
+}
+
+/**
+ * 壁纸卡片通用菜单：供「⋯」按钮（mode=button，卡片内绝对定位）与右键（mode=context，
+ * 视口内固定定位）共用同一份结构与动作。点击菜单项后先关闭菜单再执行动作。
+ */
+function CardMenu({
+  item,
+  applying,
+  mode,
+  x,
+  y,
+  onClose,
+  onPreview,
+  onApply,
+  onCopyUrl,
+  onBlacklist,
+}: CardMenuProps) {
+  const runAction = (action: () => void) => {
+    onClose();
+    action();
+  };
+  const positionStyle =
+    mode === "context"
+      ? clampMenuPosition(x, y)
+      : undefined;
+  return (
+    <div
+      role="menu"
+      className={[
+        cardMenuContainerClass(mode),
+        mode === "context" ? "fixed z-50" : "",
+      ].join(" ")}
+      style={positionStyle}
+    >
+      <button
+        type="button"
+        role="menuitem"
+        onClick={(e) => {
+          e.stopPropagation();
+          runAction(() => onPreview(item));
+        }}
+        className={MENU_INNER_CLASS}
+      >
+        预览大图
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={(e) => {
+          e.stopPropagation();
+          runAction(() => onApply(item));
+        }}
+        className={MENU_INNER_CLASS}
+      >
+        {applying ? APPLYING_TEXT : "下载并应用"}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={(e) => {
+          e.stopPropagation();
+          runAction(() => onCopyUrl(item));
+        }}
+        className={MENU_INNER_CLASS}
+      >
+        复制 URL
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={(e) => {
+          e.stopPropagation();
+          runAction(() => onBlacklist(item));
+        }}
+        className={MENU_DANGER_CLASS}
+      >
+        拉黑
+      </button>
     </div>
   );
 }
@@ -366,8 +510,13 @@ export default function WallpaperTool() {
   const [blacklistPage, setBlacklistPage] = useState(1);
   const [blacklistKeyword, setBlacklistKeyword] = useState("");
   const [blacklistLoading, setBlacklistLoading] = useState(false);
-  /** 当前展开「更多操作」菜单的卡片 id；null 表示未展开 */
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  /** 当前展开「更多操作」菜单的卡片实例；null 表示未展开 */
+  const [openMenu, setOpenMenu] = useState<{
+    id: string;
+    x: number;
+    y: number;
+    mode: "button" | "context";
+  } | null>(null);
 
   /** 黑名单每页条数（分页展示避免长列表卡顿） */
   const BLACKLIST_PAGE_SIZE = 20;
@@ -645,20 +794,22 @@ export default function WallpaperTool() {
     };
   }, []);
 
-  // 卡片「更多操作」菜单：点击外部或按 Esc 关闭（菜单按钮自身 stopPropagation 不会触发关闭）
+  // 卡片「更多操作」菜单：点击外部、滚动或按 Esc 关闭（菜单按钮自身 stopPropagation 不会触发关闭）
   useEffect(() => {
-    if (openMenuId === null) return;
-    const close = () => setOpenMenuId(null);
+    if (openMenu === null) return;
+    const close = () => setOpenMenu(null);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpenMenuId(null);
+      if (e.key === "Escape") setOpenMenu(null);
     };
     window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
       window.removeEventListener("keydown", onKey);
     };
-  }, [openMenuId]);
+  }, [openMenu]);
 
   function scheduleSourceSave(
     sources: WallpaperSettings["sources"],
@@ -1475,7 +1626,22 @@ export default function WallpaperTool() {
           {items.map((item, index) => (
             <div
               key={item.id}
-              onClick={() => void openPreview(index)}
+              onClick={() => {
+                if (openMenu?.id === item.id) {
+                  setOpenMenu(null);
+                  return;
+                }
+                void openPreview(index);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setOpenMenu({
+                  id: item.id,
+                  x: e.clientX,
+                  y: e.clientY,
+                  mode: "context",
+                });
+              }}
               className="relative cursor-pointer overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <div className="absolute right-1.5 top-1.5 z-10">
@@ -1484,44 +1650,45 @@ export default function WallpaperTool() {
                   aria-label={`更多操作 ${item.id}`}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setOpenMenuId((cur) => (cur === item.id ? null : item.id));
+                    setOpenMenu((cur) =>
+                      cur?.id === item.id && cur.mode === "button"
+                        ? null
+                        : { id: item.id, x: 0, y: 0, mode: "button" },
+                    );
                   }}
                   className="rounded-md bg-black/50 px-1.5 py-0.5 text-sm leading-none text-white hover:bg-black/70"
                 >
                   ⋯
                 </button>
-                {openMenuId === item.id && (
-                  <div
-                    className="absolute right-0 top-7 z-20 min-w-28 overflow-hidden rounded-md border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900"
-                    role="menu"
-                  >
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpenMenuId(null);
-                        void handleBlacklist(item);
-                      }}
-                      className="block w-full px-3 py-1 text-left text-xs text-red-600 hover:bg-gray-100 dark:text-red-400 dark:hover:bg-gray-800"
-                    >
-                      拉黑
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpenMenuId(null);
-                        void handleCopyUrl(item);
-                      }}
-                      className="block w-full px-3 py-1 text-left text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800"
-                    >
-                      复制 URL
-                    </button>
-                  </div>
+                {openMenu?.id === item.id && openMenu.mode === "button" && (
+                  <CardMenu
+                    item={item}
+                    applying={applyingId === item.id}
+                    mode="button"
+                    x={0}
+                    y={0}
+                    onClose={() => setOpenMenu(null)}
+                    onPreview={() => void openPreview(index)}
+                    onApply={handleApply}
+                    onCopyUrl={handleCopyUrl}
+                    onBlacklist={handleBlacklist}
+                  />
                 )}
               </div>
+              {openMenu?.id === item.id && openMenu.mode === "context" && (
+                <CardMenu
+                  item={item}
+                  applying={applyingId === item.id}
+                  mode="context"
+                  x={openMenu.x}
+                  y={openMenu.y}
+                  onClose={() => setOpenMenu(null)}
+                  onPreview={() => void openPreview(index)}
+                  onApply={handleApply}
+                  onCopyUrl={handleCopyUrl}
+                  onBlacklist={handleBlacklist}
+                />
+              )}
               <ProxiedThumb
                 hash={item.thumb_hash}
                 alt={item.id}
