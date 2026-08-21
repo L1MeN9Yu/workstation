@@ -23,7 +23,13 @@ export function writeGhostyConfig(content: string): Promise<void> {
 }
 
 export interface CmuxReloadResult {
-  status: "success" | "notRunning" | "cliMissing" | "failed";
+  status:
+    | "success"
+    | "notRunning"
+    | "cliMissing"
+    | "accessDenied"
+    | "connectionFailed"
+    | "failed";
   message?: string;
 }
 
@@ -39,6 +45,10 @@ export function reloadStatusMessage(result: CmuxReloadResult): string {
       return "cmux 未运行，无法重载配置，请先启动 cmux";
     case "cliMissing":
       return "未找到 cmux 命令，请检查安装与 PATH";
+    case "accessDenied":
+      return `cmux 拒绝外部应用访问：${result.message ?? "请将 socketControlMode 设置为 automation，或配置 socket password"}`;
+    case "connectionFailed":
+      return `无法连接 cmux：${result.message ?? "请确认 cmux 正在运行且 socket 配置正确"}`;
     case "failed":
       return `配置重载失败：${result.message ?? "未知错误"}`;
   }

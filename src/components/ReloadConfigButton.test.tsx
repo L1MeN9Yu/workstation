@@ -95,6 +95,31 @@ describe("ReloadConfigButton", () => {
     );
   });
 
+  it("shows an error toast with connection guidance", async () => {
+    vi.mocked(reloadCmuxConfig).mockResolvedValue({
+      status: "connectionFailed",
+      message: "socket refused",
+    });
+    await clickReload(container);
+    expect(toast.error).toHaveBeenCalledWith(
+      reloadStatusMessage({
+        status: "connectionFailed",
+        message: "socket refused",
+      }),
+    );
+  });
+
+  it("shows an error toast for cmux external access denial", async () => {
+    vi.mocked(reloadCmuxConfig).mockResolvedValue({
+      status: "accessDenied",
+      message: "cmuxOnly",
+    });
+    await clickReload(container);
+    expect(toast.error).toHaveBeenCalledWith(
+      reloadStatusMessage({ status: "accessDenied", message: "cmuxOnly" }),
+    );
+  });
+
   it("shows an error toast when invoke rejects", async () => {
     vi.mocked(reloadCmuxConfig).mockRejectedValue(new Error("invoke error"));
     await clickReload(container);

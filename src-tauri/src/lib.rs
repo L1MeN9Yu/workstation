@@ -149,6 +149,8 @@ pub enum CmuxReloadStatus {
     Success,
     NotRunning,
     CliMissing,
+    AccessDenied(String),
+    ConnectionFailed(String),
     Failed(String),
 }
 
@@ -158,6 +160,8 @@ impl Serialize for CmuxReloadStatus {
             CmuxReloadStatus::Success => ("success", None),
             CmuxReloadStatus::NotRunning => ("notRunning", None),
             CmuxReloadStatus::CliMissing => ("cliMissing", None),
+            CmuxReloadStatus::AccessDenied(e) => ("accessDenied", Some(e)),
+            CmuxReloadStatus::ConnectionFailed(e) => ("connectionFailed", Some(e)),
             CmuxReloadStatus::Failed(e) => ("failed", Some(e)),
         };
         let mut s = serializer.serialize_struct("CmuxReloadStatus", 2)?;
@@ -172,6 +176,9 @@ impl Serialize for CmuxReloadStatus {
 #[derive(Debug, PartialEq)]
 enum CmuxRunError {
     NotFound,
+    NotRunning(String),
+    AccessDenied(String),
+    Connection(String),
     Other(String),
 }
 
@@ -308,10 +315,15 @@ fn detect_cmux_with(
 }
 
 fn run_cmux_version(bin: &Path) -> Result<String, String> {
-    match run_command(bin, &["--version"]) {
+    match run_command_with_socket_env(bin, &["--version"], cmux_socket_path()) {
         Ok(out) => Ok(out.lines().next().unwrap_or_default().trim().to_string()),
         Err(CmuxRunError::NotFound) => Err("路径不存在或不可执行".to_string()),
-        Err(CmuxRunError::Other(e)) => Err(e),
+        Err(
+            CmuxRunError::NotRunning(e)
+            | CmuxRunError::AccessDenied(e)
+            | CmuxRunError::Connection(e)
+            | CmuxRunError::Other(e),
+        ) => Err(e),
     }
 }
 
@@ -321,29 +333,109 @@ fn run_cmux(args: &[&str]) -> Result<String, CmuxRunError> {
 
 fn run_cmux_bin(args: &[&str], bin: Option<PathBuf>) -> Result<String, CmuxRunError> {
     match bin {
-        Some(bin) => run_command(&bin, args),
+        Some(bin) => run_command_with_socket_env(&bin, args, cmux_socket_path()),
         None => Err(CmuxRunError::NotFound),
     }
 }
 
+/// Finder-launched macOS apps do not inherit the shell environment that cmux
+/// injects into terminal sessions. Give the CLI its stable default socket in
+/// that case, while preserving an explicitly configured socket path.
+fn cmux_socket_path() -> Option<PathBuf> {
+    default_cmux_socket_path(
+        std::env::var_os("CMUX_SOCKET_PATH").filter(|path| !path.is_empty()),
+        dirs::home_dir(),
+    )
+}
+
+fn default_cmux_socket_path(
+    configured: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if configured.as_ref().is_some_and(|path| !path.is_empty()) {
+        None
+    } else {
+        home.map(|home| home.join(".local/state/cmux/cmux.sock"))
+    }
+}
+
+#[cfg(test)]
 fn run_command(
     program: impl AsRef<std::ffi::OsStr>,
     args: &[&str],
 ) -> Result<String, CmuxRunError> {
+    run_command_with_socket_env(program, args, None)
+}
+
+fn run_command_with_socket_env(
+    program: impl AsRef<std::ffi::OsStr>,
+    args: &[&str],
+    socket_path: Option<PathBuf>,
+) -> Result<String, CmuxRunError> {
     let program = program.as_ref();
     let display = program.to_string_lossy();
-    match Command::new(program).args(args).output() {
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(socket_path) = socket_path {
+        command.env("CMUX_SOCKET_PATH", socket_path);
+    }
+    match command.output() {
         Err(e) if e.kind() == ErrorKind::NotFound => Err(CmuxRunError::NotFound),
         Err(e) => Err(CmuxRunError::Other(e.to_string())),
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
-        Ok(out) => Err(CmuxRunError::Other(format!(
-            "{} {} failed with {}: {}",
-            display,
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))),
+        Ok(out) => {
+            let detail = format!(
+                "{} {} failed with {}: {}",
+                display,
+                args.join(" "),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            if is_cmux_access_denied_error(&detail) {
+                Err(CmuxRunError::AccessDenied(detail))
+            } else if is_cmux_not_running_error(&detail) {
+                Err(CmuxRunError::NotRunning(detail))
+            } else if is_cmux_connection_error(&detail) {
+                Err(CmuxRunError::Connection(detail))
+            } else {
+                Err(CmuxRunError::Other(detail))
+            }
+        }
     }
+}
+
+fn is_cmux_access_denied_error(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("access denied")
+        || detail.contains("only processes started inside cmux")
+        || detail.contains("cmuxonly")
+}
+
+fn is_cmux_connection_error(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "socket",
+        "connection refused",
+        "connection reset",
+        "timed out",
+        "not running",
+        "authorization",
+        "capability",
+    ]
+    .iter()
+    .any(|marker| detail.contains(marker))
+}
+
+fn is_cmux_not_running_error(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "connection refused",
+        "connection reset",
+        "not running",
+        "no such file",
+    ]
+    .iter()
+    .any(|marker| detail.contains(marker))
 }
 
 fn classify_reload(
@@ -353,9 +445,30 @@ fn classify_reload(
     match result {
         Ok(_) => CmuxReloadStatus::Success,
         Err(CmuxRunError::NotFound) => CmuxReloadStatus::CliMissing,
+        Err(CmuxRunError::NotRunning(_)) => CmuxReloadStatus::NotRunning,
+        Err(CmuxRunError::AccessDenied(e)) => CmuxReloadStatus::AccessDenied(e),
+        Err(CmuxRunError::Connection(e)) => match ping {
+            Some(Err(CmuxRunError::NotRunning(_))) | Some(Err(CmuxRunError::NotFound)) => {
+                CmuxReloadStatus::NotRunning
+            }
+            Some(Ok(out)) if out.trim().contains("PONG") => CmuxReloadStatus::ConnectionFailed(e),
+            Some(Err(CmuxRunError::Other(ping_error))) => {
+                CmuxReloadStatus::ConnectionFailed(ping_error)
+            }
+            _ => CmuxReloadStatus::ConnectionFailed(e),
+        },
         Err(CmuxRunError::Other(e)) => match ping {
             Some(Ok(out)) if out.trim().contains("PONG") => CmuxReloadStatus::Failed(e),
-            _ => CmuxReloadStatus::NotRunning,
+            Some(Err(CmuxRunError::NotRunning(_))) => CmuxReloadStatus::NotRunning,
+            Some(Err(CmuxRunError::NotFound)) => CmuxReloadStatus::NotRunning,
+            Some(Err(CmuxRunError::AccessDenied(message))) => {
+                CmuxReloadStatus::AccessDenied(message)
+            }
+            Some(Err(CmuxRunError::Connection(ping_error)))
+            | Some(Err(CmuxRunError::Other(ping_error))) => {
+                CmuxReloadStatus::ConnectionFailed(ping_error)
+            }
+            _ => CmuxReloadStatus::ConnectionFailed(e),
         },
     }
 }
@@ -368,7 +481,10 @@ fn reload_cmux_config_with(
     mut run: impl FnMut(&[&str]) -> Result<String, CmuxRunError>,
 ) -> Result<CmuxReloadStatus, String> {
     let reload = run(&["config", "reload"]);
-    let ping = if matches!(reload, Err(CmuxRunError::Other(_))) {
+    let ping = if matches!(
+        reload,
+        Err(CmuxRunError::Other(_) | CmuxRunError::NotRunning(_) | CmuxRunError::Connection(_))
+    ) {
         Some(run(&["ping"]))
     } else {
         None
@@ -726,6 +842,56 @@ mod tests {
     }
 
     #[test]
+    fn classify_reload_direct_not_running_is_not_running() {
+        let status = classify_reload(
+            Err(CmuxRunError::NotRunning("socket missing".to_string())),
+            None,
+        );
+        assert_eq!(status, CmuxReloadStatus::NotRunning);
+    }
+
+    #[test]
+    fn classify_reload_access_denied_is_explicit() {
+        let message = "Access denied - only processes started inside cmux can connect";
+        assert_eq!(
+            classify_reload(Err(CmuxRunError::AccessDenied(message.to_string())), None,),
+            CmuxReloadStatus::AccessDenied(message.to_string())
+        );
+    }
+
+    #[test]
+    fn classify_reload_connection_failure_uses_ping_result() {
+        let connection = Err(CmuxRunError::Connection("authorization failed".to_string()));
+        assert_eq!(
+            classify_reload(connection, Some(Ok("PONG\n".to_string()))),
+            CmuxReloadStatus::ConnectionFailed("authorization failed".to_string())
+        );
+        assert_eq!(
+            classify_reload(
+                Err(CmuxRunError::Connection("authorization failed".to_string())),
+                Some(Err(CmuxRunError::NotRunning(
+                    "connection refused".to_string()
+                )))
+            ),
+            CmuxReloadStatus::NotRunning
+        );
+        assert_eq!(
+            classify_reload(
+                Err(CmuxRunError::Connection("authorization failed".to_string())),
+                Some(Err(CmuxRunError::Other("ping failed".to_string())))
+            ),
+            CmuxReloadStatus::ConnectionFailed("ping failed".to_string())
+        );
+        assert_eq!(
+            classify_reload(
+                Err(CmuxRunError::Connection("authorization failed".to_string())),
+                None,
+            ),
+            CmuxReloadStatus::ConnectionFailed("authorization failed".to_string())
+        );
+    }
+
+    #[test]
     fn classify_reload_failed_when_ping_pongs() {
         let status = classify_reload(
             Err(CmuxRunError::Other("reload failed".to_string())),
@@ -743,22 +909,49 @@ mod tests {
             Err(CmuxRunError::Other("reload failed".to_string())),
             Some(Ok("nothing here".to_string())),
         );
-        assert_eq!(status, CmuxReloadStatus::NotRunning);
+        assert_eq!(
+            status,
+            CmuxReloadStatus::ConnectionFailed("reload failed".to_string())
+        );
     }
 
     #[test]
     fn classify_reload_not_running_when_ping_errors() {
         let status = classify_reload(
             Err(CmuxRunError::Other("reload failed".to_string())),
-            Some(Err(CmuxRunError::Other("connect refused".to_string()))),
+            Some(Err(CmuxRunError::NotRunning("connect refused".to_string()))),
         );
         assert_eq!(status, CmuxReloadStatus::NotRunning);
+        assert_eq!(
+            classify_reload(
+                Err(CmuxRunError::Other("reload failed".to_string())),
+                Some(Err(CmuxRunError::NotFound)),
+            ),
+            CmuxReloadStatus::NotRunning
+        );
+        assert_eq!(
+            classify_reload(
+                Err(CmuxRunError::Other("reload failed".to_string())),
+                Some(Err(CmuxRunError::Connection("socket failed".to_string()))),
+            ),
+            CmuxReloadStatus::ConnectionFailed("socket failed".to_string())
+        );
+        assert_eq!(
+            classify_reload(
+                Err(CmuxRunError::Other("reload failed".to_string())),
+                Some(Err(CmuxRunError::Other("ping failed".to_string()))),
+            ),
+            CmuxReloadStatus::ConnectionFailed("ping failed".to_string())
+        );
     }
 
     #[test]
     fn classify_reload_not_running_when_ping_absent() {
         let status = classify_reload(Err(CmuxRunError::Other("reload failed".to_string())), None);
-        assert_eq!(status, CmuxReloadStatus::NotRunning);
+        assert_eq!(
+            status,
+            CmuxReloadStatus::ConnectionFailed("reload failed".to_string())
+        );
     }
 
     #[test]
@@ -769,6 +962,20 @@ mod tests {
         assert_eq!(not_running, serde_json::json!({"status": "notRunning"}));
         let cli_missing = serde_json::to_value(CmuxReloadStatus::CliMissing).unwrap();
         assert_eq!(cli_missing, serde_json::json!({"status": "cliMissing"}));
+        let access_denied =
+            serde_json::to_value(CmuxReloadStatus::AccessDenied("cmuxOnly".to_string())).unwrap();
+        assert_eq!(
+            access_denied,
+            serde_json::json!({"status": "accessDenied", "message": "cmuxOnly"})
+        );
+        let connection_failed = serde_json::to_value(CmuxReloadStatus::ConnectionFailed(
+            "socket refused".to_string(),
+        ))
+        .unwrap();
+        assert_eq!(
+            connection_failed,
+            serde_json::json!({"status": "connectionFailed", "message": "socket refused"})
+        );
         let failed = serde_json::to_value(CmuxReloadStatus::Failed("boom".to_string())).unwrap();
         assert_eq!(
             failed,
@@ -786,6 +993,37 @@ mod tests {
     fn run_command_nonzero_exit_is_other_error() {
         let err = run_command("cargo", &["__definitely_not_a_cargo_subcommand__"]).unwrap_err();
         assert!(matches!(err, CmuxRunError::Other(_)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_command_classifies_socket_errors() {
+        let dir = temp_dir("run-command-errors");
+        let not_running = dir.join("not-running");
+        fs::write(
+            &not_running,
+            "#!/bin/sh\necho 'connection refused' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let connection = dir.join("connection");
+        fs::write(
+            &connection,
+            "#!/bin/sh\necho 'authorization failed' >&2\nexit 1\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&not_running, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&connection, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(matches!(
+            run_command(&not_running, &[]),
+            Err(CmuxRunError::NotRunning(_))
+        ));
+        assert!(matches!(
+            run_command(&connection, &[]),
+            Err(CmuxRunError::Connection(_))
+        ));
     }
 
     #[test]
@@ -828,6 +1066,7 @@ mod tests {
             CmuxReloadStatus::Success
                 | CmuxReloadStatus::NotRunning
                 | CmuxReloadStatus::CliMissing
+                | CmuxReloadStatus::AccessDenied(_)
                 | CmuxReloadStatus::Failed(_)
         ));
     }
@@ -917,6 +1156,27 @@ mod tests {
     fn cmux_bin_with_falls_through_on_blank_config() {
         let found = cmux_bin_with(Some("   ".to_string()));
         assert!(found.is_some() == cmux_bin_with(None).is_some());
+    }
+
+    #[test]
+    fn default_cmux_socket_path_only_fills_missing_environment() {
+        let home = PathBuf::from("/Users/tester");
+        assert_eq!(
+            default_cmux_socket_path(None, Some(home.clone())),
+            Some(home.join(".local/state/cmux/cmux.sock"))
+        );
+        assert_eq!(
+            default_cmux_socket_path(Some(std::ffi::OsString::from("/custom.sock")), Some(home)),
+            None
+        );
+        assert_eq!(
+            default_cmux_socket_path(
+                Some(std::ffi::OsString::new()),
+                Some(PathBuf::from("/Users/tester"))
+            ),
+            Some(PathBuf::from("/Users/tester/.local/state/cmux/cmux.sock"))
+        );
+        assert_eq!(default_cmux_socket_path(None, None), None);
     }
 
     #[test]
@@ -1065,6 +1325,25 @@ mod tests {
         }
         let out = run_cmux_bin(&["ping"], Some(bin.clone())).unwrap();
         assert_eq!(out.trim(), "ok");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_command_with_socket_env_injects_finder_default() {
+        let dir = temp_dir("cmux-socket-env");
+        let script = dir.join("print-socket");
+        fs::write(&script, "#!/bin/sh\nprintf '%s' \"$CMUX_SOCKET_PATH\"\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = run_command_with_socket_env(
+            &script,
+            &[],
+            Some(PathBuf::from("/Users/tester/.local/state/cmux/cmux.sock")),
+        )
+        .unwrap();
+        assert_eq!(out, "/Users/tester/.local/state/cmux/cmux.sock");
     }
 
     #[test]
