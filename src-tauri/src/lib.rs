@@ -857,6 +857,13 @@ mod tests {
             classify_reload(Err(CmuxRunError::AccessDenied(message.to_string())), None,),
             CmuxReloadStatus::AccessDenied(message.to_string())
         );
+        assert_eq!(
+            classify_reload(
+                Err(CmuxRunError::Other("reload failed".to_string())),
+                Some(Err(CmuxRunError::AccessDenied(message.to_string()))),
+            ),
+            CmuxReloadStatus::AccessDenied(message.to_string())
+        );
     }
 
     #[test]
@@ -1011,10 +1018,17 @@ mod tests {
             "#!/bin/sh\necho 'authorization failed' >&2\nexit 1\n",
         )
         .unwrap();
+        let access_denied = dir.join("access-denied");
+        fs::write(
+            &access_denied,
+            "#!/bin/sh\necho 'Access denied - only processes started inside cmux can connect' >&2\nexit 1\n",
+        )
+        .unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&not_running, fs::Permissions::from_mode(0o755)).unwrap();
             fs::set_permissions(&connection, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&access_denied, fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert!(matches!(
             run_command(&not_running, &[]),
@@ -1024,6 +1038,34 @@ mod tests {
             run_command(&connection, &[]),
             Err(CmuxRunError::Connection(_))
         ));
+        assert!(matches!(
+            run_command(&access_denied, &[]),
+            Err(CmuxRunError::AccessDenied(_))
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_cmux_version_preserves_external_error_details() {
+        let dir = temp_dir("cmux-version-errors");
+        let cases = [
+            ("not-running", "connection refused"),
+            ("access-denied", "access denied"),
+            ("connection", "socket failed"),
+        ];
+        for (name, message) in cases {
+            let script = dir.join(name);
+            fs::write(
+                &script,
+                format!("#!/bin/sh\necho '{message}' >&2\nexit 1\n"),
+            )
+            .unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            assert!(run_cmux_version(&script).unwrap_err().contains(message));
+        }
     }
 
     #[test]
