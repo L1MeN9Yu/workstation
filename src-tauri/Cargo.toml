@@ -1,6 +1,6 @@
 [package]
 name = "workstation"
-version = "0.7.0"
+version = "0.7.1"
 description = "A Tauri app to manage and optimize developer daily work"
 authors = ["L1MeN9Yu"]
 edition = "2021"
