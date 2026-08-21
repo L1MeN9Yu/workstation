@@ -83,6 +83,36 @@ describe("cmuxConfig", () => {
     expect(reloadStatusMessage({ status: "cliMissing" })).toContain("未找到 cmux 命令");
   });
 
+  it("reloadStatusMessage maps external access denial", () => {
+    const msg = reloadStatusMessage({
+      status: "accessDenied",
+      message: "only processes started inside cmux can connect",
+    });
+    expect(msg).toContain("拒绝外部应用访问");
+    expect(msg).toContain("only processes started inside cmux");
+  });
+
+  it("reloadStatusMessage gives access denial guidance without detail", () => {
+    expect(reloadStatusMessage({ status: "accessDenied" })).toContain(
+      "socketControlMode 设置为 automation",
+    );
+  });
+
+  it("reloadStatusMessage maps connection failures with guidance", () => {
+    const msg = reloadStatusMessage({
+      status: "connectionFailed",
+      message: "socket refused",
+    });
+    expect(msg).toContain("无法连接 cmux");
+    expect(msg).toContain("socket refused");
+  });
+
+  it("reloadStatusMessage gives connection guidance without detail", () => {
+    expect(reloadStatusMessage({ status: "connectionFailed" })).toContain(
+      "socket 配置正确",
+    );
+  });
+
   it("reloadStatusMessage maps failed with message", () => {
     const msg = reloadStatusMessage({ status: "failed", message: "boom" });
     expect(msg).toContain("boom");

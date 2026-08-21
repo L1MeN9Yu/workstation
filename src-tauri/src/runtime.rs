@@ -145,8 +145,10 @@ pub async fn list_system_fonts(_app: AppHandle) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
-    reload_cmux_config_impl()
+pub async fn reload_cmux_config() -> Result<CmuxReloadStatus, String> {
+    tauri::async_runtime::spawn_blocking(reload_cmux_config_impl)
+        .await
+        .map_err(|e| format!("cmux reload task failed: {e}"))?
 }
 
 #[tauri::command]
