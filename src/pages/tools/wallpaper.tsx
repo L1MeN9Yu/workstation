@@ -14,6 +14,12 @@ import EmptyState from "../../components/EmptyState";
 import Alert from "../../components/Alert";
 import { WallpaperLibrary } from "./WallpaperLibrary";
 import {
+  MENU_DANGER_CLASS,
+  MENU_INNER_CLASS,
+  clampMenuPosition,
+  useContextMenuCloser,
+} from "./wallpaperMenu";
+import {
   BIT_GROUPS,
   RATIO_OPTIONS,
   addBlacklistedWallpapers,
@@ -68,23 +74,6 @@ const MIN_SCALE = 0.2;
 const MAX_SCALE = 5;
 /** 拖拽超过该距离（px）才视为平移，用于抑制拖拽结束后的 click 关闭 */
 const DRAG_THRESHOLD_PX = 4;
-
-/** 卡片菜单预估尺寸（宽×高，px）：用于右键菜单弹出位置视口收敛 */
-const CARD_MENU_WIDTH = 112;
-const CARD_MENU_HEIGHT = 132;
-
-/** 将右键菜单左上角限制在视口内，避免超出窗口边界（光标贴近边缘时内移） */
-function clampMenuPosition(
-  x: number,
-  y: number,
-): { left: number; top: number } {
-  const vw = typeof window !== "undefined" ? window.innerWidth : 0;
-  const vh = typeof window !== "undefined" ? window.innerHeight : 0;
-  return {
-    left: Math.max(0, Math.min(x, vw - CARD_MENU_WIDTH)),
-    top: Math.max(0, Math.min(y, vh - CARD_MENU_HEIGHT)),
-  };
-}
 
 /** 将缩放值限制在允许范围内 */
 function clampZoom(scale: number): number {
@@ -274,12 +263,6 @@ interface CardMenuProps {
   onCopyUrl: (item: WallpaperItem) => void;
   onBlacklist: (item: WallpaperItem) => void;
 }
-
-/** 卡片菜单通用按钮文字样式（危险项用红色） */
-const MENU_INNER_CLASS =
-  "block w-full px-3 py-1 text-left text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800";
-const MENU_DANGER_CLASS =
-  "block w-full px-3 py-1 text-left text-xs text-red-600 hover:bg-gray-100 dark:text-red-400 dark:hover:bg-gray-800";
 
 /** 脚手架的容器样式，接受绝对/固定两种定位的差集 */
 function cardMenuContainerClass(mode: "button" | "context"): string {
@@ -795,21 +778,7 @@ export default function WallpaperTool() {
   }, []);
 
   // 卡片「更多操作」菜单：点击外部、滚动或按 Esc 关闭（菜单按钮自身 stopPropagation 不会触发关闭）
-  useEffect(() => {
-    if (openMenu === null) return;
-    const close = () => setOpenMenu(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpenMenu(null);
-    };
-    window.addEventListener("click", close);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [openMenu]);
+  useContextMenuCloser(openMenu !== null, () => setOpenMenu(null));
 
   function scheduleSourceSave(
     sources: WallpaperSettings["sources"],
