@@ -521,4 +521,223 @@ describe("WallpaperLibrary", () => {
     expect(dialog.textContent).toContain("预览加载失败：Error: corrupt file");
     expect(dialog.querySelector('[aria-label="预览位置"]')?.textContent).toBe("2 / 2");
   });
+
+  describe("右键菜单", () => {
+    function cardAt(index: number): HTMLElement {
+      return container.querySelectorAll(
+        ".overflow-hidden.rounded-lg.border",
+      )[index] as HTMLElement;
+    }
+
+    function menuEl(): HTMLElement | null {
+      return container.querySelector('[role="menu"]');
+    }
+
+    function menuItem(text: string): HTMLButtonElement {
+      return Array.from(menuEl()!.querySelectorAll('[role="menuitem"]')).find(
+        (b) => b.textContent === text,
+      ) as HTMLButtonElement;
+    }
+
+    function rightClick(
+      card: HTMLElement,
+      x: number,
+      y: number,
+    ): { defaultPrevented: boolean } {
+      let defaultPrevented = false;
+      const event = new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      });
+      event.preventDefault = () => {
+        defaultPrevented = true;
+      };
+      act(() => {
+        card.dispatchEvent(event);
+      });
+      return { defaultPrevented };
+    }
+
+    it("卡片右键弹出菜单并拦截原生菜单", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      root = setup(container);
+      await flush();
+      const card = cardAt(0);
+      const prevented = rightClick(card, 300, 300);
+      await flush();
+      expect(prevented.defaultPrevented).toBe(true);
+      expect(menuEl()).not.toBeNull();
+      expect(menuEl()!.textContent).toContain("预览大图");
+      expect(menuEl()!.textContent).toContain("应用为背景");
+      expect(menuEl()!.textContent).toContain("删除");
+    });
+
+    it("菜单在光标处弹出并视口内收敛", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      const style = menuEl()!.getAttribute("style") ?? "";
+      expect(style).toContain("left: 300px");
+      expect(style).toContain("top: 300px");
+    });
+
+    it("菜单项预览大图打开查看器并关闭菜单", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      vi.mocked(readLocalWallpaperFile).mockResolvedValue(
+        "data:image/png;base64,big",
+      );
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      await act(async () => {
+        menuItem("预览大图").click();
+      });
+      await flush();
+      expect(readLocalWallpaperFile).toHaveBeenCalledWith("/w/a.png");
+      expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(menuEl()).toBeNull();
+    });
+
+    it("菜单项应用为背景调用 applyWallpaper 并关闭菜单", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      vi.mocked(applyWallpaper).mockResolvedValue({
+        imagePath: "/w/a.png",
+        reloadMessage: "已重载",
+        target: "cmux",
+      });
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      await act(async () => {
+        menuItem("应用为背景").click();
+      });
+      expect(menuEl()).toBeNull();
+      await flush();
+      expect(applyWallpaper).toHaveBeenCalledWith("/w/a.png", "cmux", "");
+      expect(toast.success).toHaveBeenCalledWith(
+        "已应用到 cmux：/w/a.png。已重载",
+      );
+    });
+
+    it("菜单项应用为背景在 iTerm2 未选 Profile 时引导设置", async () => {
+      const onRequireProfile = vi.fn();
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      root = setup(container, {
+        applyTarget: "iterm2",
+        iterm2Profile: "",
+        onRequireProfile,
+      });
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      await act(async () => {
+        menuItem("应用为背景").click();
+      });
+      await flush();
+      expect(onRequireProfile).toHaveBeenCalled();
+      expect(applyWallpaper).not.toHaveBeenCalled();
+    });
+
+    it("菜单项删除需确认并刷新列表", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      vi.mocked(deleteLocalWallpapers).mockResolvedValue({
+        deleted: ["/w/a.png"],
+        errors: [],
+      });
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      await act(async () => {
+        menuItem("删除").click();
+      });
+      await flush();
+      expect(confirmDialog).toHaveBeenCalledWith(
+        "确认删除 1 张壁纸？此操作不可恢复。",
+      );
+      expect(deleteLocalWallpapers).toHaveBeenCalledWith(["/w/a.png"]);
+      expect(toast.success).toHaveBeenCalledWith("已删除 1 张壁纸");
+      expect(vi.mocked(listLocalWallpapers)).toHaveBeenCalledTimes(2);
+    });
+
+    it("菜单项删除取消不删除文件", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      vi.mocked(confirmDialog).mockResolvedValue(false);
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      await act(async () => {
+        menuItem("删除").click();
+      });
+      await flush();
+      expect(deleteLocalWallpapers).not.toHaveBeenCalled();
+      expect(vi.mocked(listLocalWallpapers)).toHaveBeenCalledTimes(1);
+    });
+
+    it("菜单打开时点击卡片关闭菜单且不触发预览", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      expect(menuEl()).not.toBeNull();
+      const thumb = container.querySelector(
+        "button[title='点击预览大图']",
+      ) as HTMLButtonElement;
+      await act(async () => {
+        thumb.click();
+      });
+      await flush();
+      expect(menuEl()).toBeNull();
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    });
+
+    it("按 Esc 关闭右键菜单", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      expect(menuEl()).not.toBeNull();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      });
+      await flush();
+      expect(menuEl()).toBeNull();
+    });
+
+    it("页面滚动关闭右键菜单", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A]);
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      expect(menuEl()).not.toBeNull();
+      await act(async () => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+      await flush();
+      expect(menuEl()).toBeNull();
+    });
+
+    it("同时只保留一个菜单实例", async () => {
+      vi.mocked(listLocalWallpapers).mockResolvedValue([ITEM_A, ITEM_B]);
+      root = setup(container);
+      await flush();
+      rightClick(cardAt(0), 300, 300);
+      await flush();
+      expect(menuEl()).not.toBeNull();
+      rightClick(cardAt(1), 300, 300);
+      await flush();
+      expect(menuEl()).not.toBeNull();
+      expect(container.querySelectorAll('[role="menu"]').length).toBe(1);
+    });
+  });
 });

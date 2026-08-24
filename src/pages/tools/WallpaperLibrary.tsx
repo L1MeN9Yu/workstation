@@ -15,6 +15,12 @@ import { confirmDialog } from "../../lib/confirm";
 import { toast } from "../../lib/toast";
 import Alert from "../../components/Alert";
 import EmptyState from "../../components/EmptyState";
+import {
+  MENU_DANGER_CLASS,
+  MENU_INNER_CLASS,
+  clampMenuPosition,
+  useContextMenuCloser,
+} from "./wallpaperMenu";
 
 interface WallpaperLibraryProps {
   applyTarget: ApplyWallpaperTarget;
@@ -107,8 +113,18 @@ export function WallpaperLibrary({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  /** 当前右键菜单的卡片实例；null 表示未展开 */
+  const [contextMenu, setContextMenu] = useState<{
+    index: number;
+    path: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const previewReqRef = useRef(0);
   const loadReqRef = useRef(0);
+
+  /** 右键菜单：点击外部、滚动或按 Esc 关闭 */
+  useContextMenuCloser(contextMenu !== null, () => setContextMenu(null));
 
   /** 当前预览的壁纸路径：按索引从列表推导，索引越界（列表刷新）时自动回到关闭态 */
   const previewPath =
@@ -334,11 +350,26 @@ export function WallpaperLibrary({
           {items.map((item, index) => (
             <div
               key={item.absolutePath}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({
+                  index,
+                  path: item.absolutePath,
+                  x: e.clientX,
+                  y: e.clientY,
+                });
+              }}
               className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <button
                 type="button"
-                onClick={() => void openPreview(index)}
+                onClick={() => {
+                  if (contextMenu?.path === item.absolutePath) {
+                    setContextMenu(null);
+                    return;
+                  }
+                  void openPreview(index);
+                }}
                 className="block w-full cursor-pointer"
                 title="点击预览大图"
               >
@@ -385,6 +416,52 @@ export function WallpaperLibrary({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {contextMenu && (
+        <div
+          role="menu"
+          aria-label="壁纸右键菜单"
+          className="fixed z-50 min-w-28 overflow-hidden rounded-md border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900"
+          style={clampMenuPosition(contextMenu.x, contextMenu.y)}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              setContextMenu(null);
+              void openPreview(contextMenu.index);
+            }}
+            className={MENU_INNER_CLASS}
+          >
+            预览大图
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              setContextMenu(null);
+              void handleApply(contextMenu.path);
+            }}
+            className={MENU_INNER_CLASS}
+          >
+            {applyingPath === contextMenu.path ? "应用中..." : "应用为背景"}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              setContextMenu(null);
+              void handleDelete([contextMenu.path]);
+            }}
+            className={MENU_DANGER_CLASS}
+          >
+            删除
+          </button>
         </div>
       )}
 
